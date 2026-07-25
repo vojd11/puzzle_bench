@@ -36,6 +36,7 @@ import zebra  # noqa: F401  (imported for side effects / availability check)
 RESULTS_FILE = "results.jsonl"
 WRITE_LOCK = threading.Lock()
 RUNS: dict = {}  # run_id -> {"q": Queue, "stop": Event, "done": bool}
+LAST_PASS_RATIO = 0.67  # keeps the embedded dashboard consistent with the last run
 
 DEFAULT_LEVELS = "3x3,4x4,5x5,6x6,7x7"
 
@@ -108,6 +109,8 @@ def do_run(run_id: str, cfg: dict):
         levels = parse_levels(cfg["levels"])
         attempts = int(cfg["attempts"])
         pass_ratio = float(cfg["pass_ratio"])
+        global LAST_PASS_RATIO
+        LAST_PASS_RATIO = pass_ratio
         parallel = max(1, int(cfg["parallel"]))
         seed = str(cfg["seed"])
         models = cfg["models"]
@@ -290,7 +293,7 @@ class Handler(BaseHTTPRequestHandler):
                     "background:#f9f9f7'>"
                     "<p>No results yet — configure a run on the left and press "
                     "<b>Run benchmark</b>.</p></body>")
-        payload = report.build_payload(rows, 0.67)
+        payload = report.build_payload(rows, LAST_PASS_RATIO)
         return report.render_html(payload, "Live results")
 
     def _sse(self, run_id: str):
