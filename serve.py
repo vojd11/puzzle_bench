@@ -23,6 +23,7 @@ import json
 import os
 import queue
 import random
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -59,14 +60,27 @@ PRESETS = {
 
 
 # ------------------------------------------------------------- run engine ---
+MAX_HOUSES = min(len(c["values"]) for c in zebra.DEFAULT_CATS)  # values available per property
+MAX_PROPS = len(zebra.DEFAULT_CATS)                             # properties available
+
+
 def parse_levels(s: str):
+    """Parse 'NxM,NxM,…' into [(N, M), …], with clear errors and size bounds."""
     out = []
-    for tok in s.replace(" ", "").split(","):
+    for tok in s.replace(" ", "").lower().split(","):
         if not tok:
             continue
-        n, m = tok.lower().split("x")
-        out.append((int(n), int(m)))
-    return out or [(3, 3)]
+        m = re.fullmatch(r"(\d+)x(\d+)", tok)
+        if not m:
+            raise ValueError(f"bad level '{tok}' — use NxM like 4x4")
+        n, p = int(m.group(1)), int(m.group(2))
+        if not (2 <= n <= MAX_HOUSES) or not (2 <= p <= MAX_PROPS):
+            raise ValueError(
+                f"level '{tok}' out of range — houses 2..{MAX_HOUSES}, properties 2..{MAX_PROPS}")
+        out.append((n, p))
+    if not out:
+        raise ValueError("no levels given")
+    return out
 
 
 def _write(rec: dict):
@@ -199,23 +213,46 @@ def validate_and_normalize(cfg: dict) -> dict:
     if not mock and not api_key:
         raise ValueError("API key is required (or pick a mock mode to test without one)")
 
+    levels = cfg.get("levels") or DEFAULT_LEVELS
+    parse_levels(levels)  # validate now so the user gets an immediate, clear error
+
+    def num(key, default, cast):
+        """Cast an optional numeric field, treating missing/'' as the default."""
+        v = cfg.get(key)
+        if v in (None, ""):
+            return default
+        try:
+            return cast(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a number")
+
+    attempts = num("attempts", 3, int)
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    pass_ratio = num("pass_ratio", 0.67, float)
+    if not 0 < pass_ratio <= 1:
+        raise ValueError("pass_ratio must be between 0 (exclusive) and 1")
+    parallel = num("parallel", 1, int)
+    if parallel < 1:
+        raise ValueError("parallel must be at least 1")
+
     return {
         "mock": mock,
         "models": uniq,
         "base_url": (cfg.get("base_url") or "https://api.openai.com/v1").strip(),
         "api_key": api_key,
-        "levels": cfg.get("levels") or DEFAULT_LEVELS,
-        "attempts": int(cfg.get("attempts") or 3),
-        "pass_ratio": float(cfg.get("pass_ratio") or 0.67),
+        "levels": levels,
+        "attempts": attempts,
+        "pass_ratio": pass_ratio,
         "difficulty": cfg.get("difficulty") or "medium",
-        "parallel": int(cfg.get("parallel") or 1),
-        "max_tokens": int(cfg.get("max_tokens") or 16000),
+        "parallel": parallel,
+        "max_tokens": num("max_tokens", 16000, int),
         "tokens_param": cfg.get("tokens_param") or "max_tokens",
-        "temperature": float(cfg.get("temperature") if cfg.get("temperature") not in (None, "") else 0.0),
+        "temperature": num("temperature", 0.0, float),
         "no_temperature": bool(cfg.get("no_temperature")),
-        "timeout": int(cfg.get("timeout") or 600),
-        "sleep": float(cfg.get("sleep") or 0),
-        "seed": cfg.get("seed") or "zebra-bench-v1",
+        "timeout": num("timeout", 600, int),
+        "sleep": num("sleep", 0.0, float),
+        "seed": str(cfg.get("seed") or "zebra-bench-v1"),
         "fresh": bool(cfg.get("fresh")),
         "strict_no_code": bool(cfg.get("strict_no_code")),
     }
