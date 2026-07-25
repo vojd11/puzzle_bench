@@ -124,6 +124,11 @@ def run_attempt(args, model: str, N: int, M: int, num: int, idx: int) -> Dict:
         rec.update({k: r.get(k) for k in
                     ("latency", "prompt_tokens", "completion_tokens", "reasoning_tokens", "finish_reason")})
         rec["code_flag"] = zebra.looks_like_code(r["text"])
+        # strict mode: a reply that writes code to solve the puzzle is disqualified,
+        # even if the grid it produced happens to be right (it broke the no-code rule).
+        if getattr(args, "strict_no_code", False) and rec["code_flag"]:
+            rec["correct"] = False
+            rec["disqualified"] = True
         rec["reply_chars"] = len(r["text"])
         if args.save_replies:
             rec["reply"] = r["text"]
@@ -159,9 +164,11 @@ def run_model(args, model: str, out) -> Dict:
         ratio = ok / len(results)
         errs = sum(1 for r in results if r.get("error"))
         flags = sum(1 for r in results if r.get("code_flag"))
+        dq = sum(1 for r in results if r.get("disqualified"))
+        code_note = (f" | {dq} disqualified (code)" if dq
+                     else f" | {flags} code-flagged" if flags else "")
         print(f"  {N}x{M}: {ok}/{len(results)} solved | cell acc {acc:.0%}"
-              + (f" | {errs} errors" if errs else "")
-              + (f" | {flags} code-flagged" if flags else ""), flush=True)
+              + (f" | {errs} errors" if errs else "") + code_note, flush=True)
         summary["levels"].append({"level": f"{N}x{M}", "solved": ok, "attempts": len(results),
                                   "pass_ratio": ratio, "cell_acc": acc})
         if ratio >= args.pass_ratio:
@@ -181,6 +188,8 @@ def main() -> None:
     ap.add_argument("--levels", default="", help='e.g. "3x3,4x4,5x5" (default 3x3..7x7)')
     ap.add_argument("--attempts", type=int, default=3, help="puzzles per level")
     ap.add_argument("--pass-ratio", type=float, default=0.67)
+    ap.add_argument("--strict-no-code", action="store_true",
+                    help="disqualify (mark incorrect) any reply that contains code, even if the grid is right")
     ap.add_argument("--difficulty", default="medium", choices=["easy", "medium", "hard"])
     ap.add_argument("--max-tokens", type=int, default=16000)
     ap.add_argument("--tokens-param", default="max_tokens",

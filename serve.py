@@ -81,6 +81,8 @@ def _tally(rec: dict) -> dict:
         "correct": bool(rec.get("correct")),
         "cell_acc": rec.get("cell_acc") or 0.0,
         "parsed": bool(rec.get("parsed")),
+        "code_flag": bool(rec.get("code_flag")),
+        "disqualified": bool(rec.get("disqualified")),
         "error": rec.get("error"),
         "latency": rec.get("latency"),
         "seed": rec.get("seed"),
@@ -104,6 +106,7 @@ def do_run(run_id: str, cfg: dict):
             tokens_param=cfg["tokens_param"],
             timeout=cfg["timeout"],
             difficulty=cfg["difficulty"],
+            strict_no_code=cfg.get("strict_no_code", False),
             save_replies=False,
         )
         levels = parse_levels(cfg["levels"])
@@ -214,6 +217,7 @@ def validate_and_normalize(cfg: dict) -> dict:
         "sleep": float(cfg.get("sleep") or 0),
         "seed": cfg.get("seed") or "zebra-bench-v1",
         "fresh": bool(cfg.get("fresh")),
+        "strict_no_code": bool(cfg.get("strict_no_code")),
     }
 
 
@@ -482,6 +486,7 @@ iframe{width:100%;height:1400px;border:1px solid var(--ring);border-radius:15px;
         <div class="hint">Same seed ⇒ same puzzles for every model, so scores are comparable.</div>
       </details>
 
+      <div class="checkline"><input type="checkbox" id="strictNoCode"><label for="strictNoCode">Strict no-code — disqualify replies that contain code, even if the grid is right</label></div>
       <div class="checkline"><input type="checkbox" id="fresh"><label for="fresh">Start fresh — clear previous results first</label></div>
 
       <div class="btns">
@@ -562,6 +567,7 @@ function collectCfg(){
     timeout: +$('timeout').value,
     seed: $('seed').value,
     fresh: $('fresh').checked,
+    strict_no_code: $('strictNoCode').checked,
   };
 }
 
@@ -601,11 +607,13 @@ function onEvent(ev){
       n++; if(ev.correct) s++;
       td.dataset.solved=s; td.dataset.n=n;
       const bar=td.querySelector('i'), lab=td.querySelector('small');
+      if(ev.disqualified) td.dataset.dq=(+(td.dataset.dq||0))+1;
       bar.style.width=(s/n*100)+'%';
-      bar.style.background = ev.error ? 'var(--bad)' : 'var(--accent)';
-      lab.textContent=`${s}/${n}`;
+      bar.style.background = ev.error ? 'var(--bad)' : (td.dataset.dq>0 ? 'var(--warn)' : 'var(--accent)');
+      lab.textContent = td.dataset.dq>0 ? `${s}/${n} ⚠${td.dataset.dq}` : `${s}/${n}`;
     }
     if(ev.error) logLine(`<span class="no">✗ ${shortName(ev.model)} ${ev.level}: ${ev.error}</span>`);
+    else if(ev.disqualified) logLine(`<span class="no">⚠ ${shortName(ev.model)} ${ev.level}: disqualified — reply contained code</span>`);
   } else if(ev.ev==='level_done'){
     const td=cellFor(ev.model,ev.level);
     const pass = ev.pass_ratio>=passRatioNow();
