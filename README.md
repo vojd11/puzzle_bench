@@ -25,6 +25,19 @@
 Залежності: **`serve.py`, `report.py`, `bench.py` — чистий stdlib** (нічого ставити не
 треба). Лише `plots.py` потребує `matplotlib`.
 
+## Встановлення
+
+Нічого встановлювати не обов'язково — усе, крім `plots.py`, працює на голому Python 3.9+.
+Для відтворюваного середовища є **`uv.lock`** ([uv](https://docs.astral.sh/uv/)):
+
+```bash
+uv sync                     # середовище для бенчмарку/UI/дашборда (без залежностей)
+uv sync --extra plots       # + matplotlib для PNG-графіків
+uv run python serve.py      # запустити будь-що у цьому середовищі
+```
+
+Без uv так само працює `pip install matplotlib` (лише для `plots.py`).
+
 ## Запуск через веб-UI (найпростіше)
 
 ```bash
