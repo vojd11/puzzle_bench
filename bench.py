@@ -126,9 +126,11 @@ def run_attempt(args, model: str, N: int, M: int, num: int, idx: int) -> Dict:
         rec["code_flag"] = zebra.looks_like_code(r["text"])
         # strict mode: a reply that writes code to solve the puzzle is disqualified,
         # even if the grid it produced happens to be right (it broke the no-code rule).
+        # A disqualification is a full forfeit — zero credit on every metric — so a
+        # code-cheater can't inflate cell accuracy or win the leaderboard tiebreaker.
         if getattr(args, "strict_no_code", False) and rec["code_flag"]:
-            rec["correct"] = False
-            rec["disqualified"] = True
+            rec.update({"correct": False, "grid_correct": False, "answer_correct": False,
+                        "cells_correct": 0, "cell_acc": 0.0, "disqualified": True})
         rec["reply_chars"] = len(r["text"])
         if args.save_replies:
             rec["reply"] = r["text"]
@@ -143,7 +145,10 @@ def run_attempt(args, model: str, N: int, M: int, num: int, idx: int) -> Dict:
 def run_model(args, model: str, out) -> Dict:
     print(f"\n=== {model} ===", flush=True)
     summary = {"model": model, "max_level": None, "levels": []}
-    rng = random.Random(args.seed + model)
+    # Seed from the base seed ONLY (not the model name) so every model gets the
+    # identical puzzle at each (level, attempt) — a paired comparison, as the
+    # --seed help and the UI both promise. Same seed => same puzzles for all models.
+    rng = random.Random(args.seed)
     for (N, M) in args.levels:
         nums = [rng.getrandbits(32) for _ in range(args.attempts)]
         results: List[Dict] = []

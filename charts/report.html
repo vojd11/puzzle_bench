@@ -165,7 +165,7 @@ td.num{font-variant-numeric:tabular-nums}
 <div class="tt" id="tt"></div>
 
 <script>
-const DATA = {"models": ["broken", "mock", "noisy-a", "noisy-b"], "order": ["mock", "noisy-b", "noisy-a", "broken"], "levels": ["3x3", "4x4", "5x5", "6x6", "7x7"], "per": {"broken": {"3x3": {"n": 2, "solved": 0, "pass_rate": 0.0, "cell_acc": 0.0, "answer_acc": 0.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 2, "code_flag": 0, "errors": 0}}, "mock": {"3x3": {"n": 3, "solved": 3, "pass_rate": 1.0, "cell_acc": 1.0, "answer_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "4x4": {"n": 3, "solved": 3, "pass_rate": 1.0, "cell_acc": 1.0, "answer_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "5x5": {"n": 3, "solved": 3, "pass_rate": 1.0, "cell_acc": 1.0, "answer_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "6x6": {"n": 3, "solved": 3, "pass_rate": 1.0, "cell_acc": 1.0, "answer_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "7x7": {"n": 3, "solved": 3, "pass_rate": 1.0, "cell_acc": 1.0, "answer_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}}, "noisy-a": {"3x3": {"n": 4, "solved": 1, "pass_rate": 0.25, "cell_acc": 0.8333333333333334, "answer_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}}, "noisy-b": {"3x3": {"n": 4, "solved": 3, "pass_rate": 0.75, "cell_acc": 0.9444444444444444, "answer_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "4x4": {"n": 4, "solved": 0, "pass_rate": 0.0, "cell_acc": 0.75, "answer_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}}}, "reached": {"broken": -1, "mock": 4, "noisy-a": -1, "noisy-b": 0}, "totals": {"broken": {"n": 2, "solved": 0, "cell_acc": 0.0, "latency": 0.01, "ctokens": 0.0, "parse_fail": 2, "code_flag": 0, "errors": 0}, "mock": {"n": 15, "solved": 15, "cell_acc": 1.0, "latency": 0.01, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "noisy-a": {"n": 4, "solved": 1, "cell_acc": 0.8333333333333334, "latency": 0.01, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "noisy-b": {"n": 8, "solved": 3, "cell_acc": 0.8472222222222222, "latency": 0.01, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}}, "pass_ratio": 0.67, "n_rows": 29, "has_tokens": false};
+const DATA = {"models": ["broken", "mock", "noisy-a", "noisy-b"], "order": ["mock", "noisy-b", "noisy-a", "broken"], "levels": ["3x3", "4x4", "5x5", "6x6", "7x7"], "per": {"broken": {"3x3": {"n": 2, "solved": 0, "pass_rate": 0.0, "cell_acc": 0.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 2, "code_flag": 0, "errors": 0}}, "mock": {"3x3": {"n": 3, "solved": 3, "pass_rate": 1.0, "cell_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "4x4": {"n": 3, "solved": 3, "pass_rate": 1.0, "cell_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "5x5": {"n": 3, "solved": 3, "pass_rate": 1.0, "cell_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "6x6": {"n": 3, "solved": 3, "pass_rate": 1.0, "cell_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "7x7": {"n": 3, "solved": 3, "pass_rate": 1.0, "cell_acc": 1.0, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}}, "noisy-a": {"3x3": {"n": 4, "solved": 1, "pass_rate": 0.25, "cell_acc": 0.8333333333333334, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}}, "noisy-b": {"3x3": {"n": 4, "solved": 3, "pass_rate": 0.75, "cell_acc": 0.9444444444444444, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "4x4": {"n": 4, "solved": 0, "pass_rate": 0.0, "cell_acc": 0.75, "latency": 0.01, "ptokens": 0.0, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}}}, "reached": {"broken": -1, "mock": 4, "noisy-a": -1, "noisy-b": 0}, "totals": {"broken": {"n": 2, "solved": 0, "cell_acc": 0.0, "latency": 0.01, "ctokens": 0.0, "parse_fail": 2, "code_flag": 0, "errors": 0}, "mock": {"n": 15, "solved": 15, "cell_acc": 1.0, "latency": 0.01, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "noisy-a": {"n": 4, "solved": 1, "cell_acc": 0.8333333333333334, "latency": 0.01, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}, "noisy-b": {"n": 8, "solved": 3, "cell_acc": 0.8472222222222222, "latency": 0.01, "ctokens": 0.0, "parse_fail": 0, "code_flag": 0, "errors": 0}}, "pass_ratio": 0.67, "n_rows": 29, "has_tokens": false};
 const SC = ['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8'];
 const cssv = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const color = i => cssv(SC[i % SC.length]);
@@ -177,6 +177,10 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 const fmtPct = x => (x*100).toFixed(0)+'%';
 const fmtPct1 = x => (x*100).toFixed(1)+'%';
 const shortName = m => m.includes('/') ? m.split('/').slice(-1)[0] : m;
+// HTML-escape anything data-derived (model names) before it goes into innerHTML.
+const esc = s => String(s).replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sn = m => esc(shortName(m));   // safe short name for HTML contexts
 const clip = (s,n=13) => s.length>n ? s.slice(0,n-1)+'…' : s;
 
 function el(tag, attrs={}, parent=null){
@@ -216,9 +220,9 @@ function renderTiles(){
   let bestCell=-1, bestCellM='—';
   for(const m of DATA.models){ const c=DATA.totals[m].cell_acc; if(c>bestCell){bestCell=c; bestCellM=m;} }
   const tiles = [
-    {k:'Top model', v:shortName(best), note:`cleared ${bestLv}`},
-    {k:'Hardest level cleared', v:hardest>=0?DATA.levels[hardest]:'none', note:`by ${shortName(hardestModel)}`},
-    {k:'Best cell accuracy', v:fmtPct(bestCell), note:shortName(bestCellM)},
+    {k:'Top model', v:sn(best), note:`cleared ${bestLv}`},
+    {k:'Hardest level cleared', v:hardest>=0?DATA.levels[hardest]:'none', note:`by ${sn(hardestModel)}`},
+    {k:'Best cell accuracy', v:fmtPct(bestCell), note:sn(bestCellM)},
     {k:'Total attempts', v:String(DATA.n_rows), note:`${DATA.models.length} models`},
   ];
   document.getElementById('tiles').innerHTML = tiles.map(t=>
@@ -233,7 +237,7 @@ function renderLegend(){
   DATA.order.forEach(m=>{
     const c = document.createElement('div');
     c.className='chip'+(active.has(m)?'':' off');
-    c.innerHTML = `<span class="sw" style="background:${color(DATA.order.indexOf(m))}"></span><span class="name">${shortName(m)}</span>`;
+    c.innerHTML = `<span class="sw" style="background:${color(DATA.order.indexOf(m))}"></span><span class="name">${sn(m)}</span>`;
     c.onclick = ()=>{
       if(active.has(m)) active.delete(m); else active.add(m);
       if(active.size===0) active.add(m); // never empty
@@ -277,7 +281,7 @@ function renderLadder(){
       const rect=el('rect',{x:padL,y,width:Math.max(w,3),height:bh,rx:6,fill:color(DATA.order.indexOf(m))},svg);
       rect.style.cursor='pointer';
       rect.addEventListener('mousemove',e=>showTT(
-        `<div class="h">${shortName(m)}</div>cleared up to <b>${DATA.levels[idx]}</b>`,e));
+        `<div class="h">${sn(m)}</div>cleared up to <b>${DATA.levels[idx]}</b>`,e));
       rect.addEventListener('mouseleave',hideTT);
     }
     const lbl=el('text',{x:padL-12,y:y+bh/2+4,'text-anchor':'end',class:'mk-lbl'},svg);
@@ -317,14 +321,13 @@ function renderPass(){
       const d=DATA.per[m][L];
       if(!d) return;
       const bx=cx-(n*gw)/2+mi*gw+1;
-      const bh=plotH*(1-(1-d.pass_rate));
       const val=d.pass_rate;
       const hh=plotH*val;
       const rect=el('rect',{x:bx,y:y(val),width:gw-2,height:Math.max(hh,val>0?2:0),rx:3,
         fill:color(DATA.order.indexOf(m))},svg);
       rect.style.cursor='pointer';
       rect.addEventListener('mousemove',e=>showTT(
-        `<div class="h">${shortName(m)} · ${L}</div>`+
+        `<div class="h">${sn(m)} · ${L}</div>`+
         `<div class="row"><span class="lft"><span class="sw" style="background:${color(DATA.order.indexOf(m))}"></span>solve rate</span><b>${fmtPct1(val)}</b></div>`+
         `<div class="row"><span class="lft">solved</span><b>${d.solved}/${d.n}</b></div>`,e));
       rect.addEventListener('mouseleave',hideTT);
@@ -374,7 +377,7 @@ function lineChart(svgId, accessor, fmtY, yMax, yTicks){
       const c=el('circle',{cx:x(p[0]),cy:y(p[1]),r:4.5,fill:color(ci),class:'dot'},svg);
       c.style.cursor='pointer';
       c.addEventListener('mousemove',e=>showTT(
-        `<div class="h">${shortName(m)} · ${p[2]}</div>`+
+        `<div class="h">${sn(m)} · ${p[2]}</div>`+
         `<div class="row"><span class="lft"><span class="sw" style="background:${color(ci)}"></span>value</span><b>${fmtY(p[1])}</b></div>`,e));
       c.addEventListener('mouseleave',hideTT);
     });
@@ -463,7 +466,7 @@ function renderTable(){
       ? `<span class="badge" style="background:color-mix(in srgb,${color(r.ci)} 20%,transparent);color:var(--ink)">${r.cleared}</span>`
       : `<span class="badge" style="background:color-mix(in srgb,var(--bad) 16%,transparent)">none</span>`;
     const cells=[
-      `<td><span class="mdl">${sw}${shortName(r.model)}</span></td>`,
+      `<td><span class="mdl">${sw}${sn(r.model)}</span></td>`,
       `<td>${clearedBadge}</td>`,
       `<td class="num">${fmtPct1(r.solve)}</td>`,
       `<td class="num">${fmtPct1(r.cell)}</td>`,

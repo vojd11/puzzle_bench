@@ -13,7 +13,9 @@ are made by, THIS local process, so:
     server talks to the provider).
 
 Progress streams live over Server-Sent Events; the embedded dashboard
-(report.py) re-renders after every level. Bind is 127.0.0.1 only.
+(report.py) re-renders after every level. Binds to 127.0.0.1 by default; pass
+--host to change it, but note there is no auth — only expose it on a network you
+trust (the server prints a warning when bound off loopback).
 """
 from __future__ import annotations
 
@@ -40,6 +42,14 @@ RUNS: dict = {}  # run_id -> {"q": Queue, "stop": Event, "done": bool}
 LAST_PASS_RATIO = 0.67  # keeps the embedded dashboard consistent with the last run
 
 DEFAULT_LEVELS = "3x3,4x4,5x5,6x6,7x7"
+KEEP_FINISHED_RUNS = 12  # cap retained finished runs so RUNS doesn't grow unbounded
+
+
+def _prune_runs():
+    """Drop old finished runs, keeping the most recent few (ids are time-ordered)."""
+    finished = sorted(rid for rid, r in RUNS.items() if r.get("done"))
+    for rid in finished[:-KEEP_FINISHED_RUNS] if len(finished) > KEEP_FINISHED_RUNS else []:
+        RUNS.pop(rid, None)
 
 PRESETS = {
     "openai": {
@@ -144,7 +154,7 @@ def do_run(run_id: str, cfg: dict):
             if stop.is_set():
                 break
             emit("model_start", model=model)
-            rng = random.Random(seed + model)
+            rng = random.Random(seed)  # base seed only -> same puzzles for every model
             max_level = None
             for (N, M) in levels:
                 if stop.is_set():
@@ -213,6 +223,10 @@ def validate_and_normalize(cfg: dict) -> dict:
     if not mock and not api_key:
         raise ValueError("API key is required (or pick a mock mode to test without one)")
 
+    base_url = (cfg.get("base_url") or "https://api.openai.com/v1").strip()
+    if not mock and not re.match(r"https?://", base_url):
+        raise ValueError("base URL must start with http:// or https://")
+
     levels = cfg.get("levels") or DEFAULT_LEVELS
     parse_levels(levels)  # validate now so the user gets an immediate, clear error
 
@@ -239,7 +253,7 @@ def validate_and_normalize(cfg: dict) -> dict:
     return {
         "mock": mock,
         "models": uniq,
-        "base_url": (cfg.get("base_url") or "https://api.openai.com/v1").strip(),
+        "base_url": base_url,
         "api_key": api_key,
         "levels": levels,
         "attempts": attempts,
@@ -308,6 +322,7 @@ class Handler(BaseHTTPRequestHandler):
                 norm = validate_and_normalize(cfg)
             except ValueError as e:
                 return self._json(400, {"error": str(e)})
+            _prune_runs()
             run_id = f"run-{int(time.time()*1000)}-{random.randint(1000,9999)}"
             RUNS[run_id] = {"q": queue.Queue(), "stop": threading.Event(), "done": False}
             threading.Thread(target=do_run, args=(run_id, norm), daemon=True).start()
@@ -615,6 +630,10 @@ function logLine(html, cls){
   el.appendChild(d); el.scrollTop=el.scrollHeight;
 }
 function shortName(m){ return m.includes('/') ? m.split('/').slice(-1)[0] : m; }
+// HTML-escape data-derived strings (model names, error text) before innerHTML.
+const esc = s => String(s).replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sn = m => esc(shortName(m));
 
 function buildTable(){
   cells={};
@@ -622,7 +641,7 @@ function buildTable(){
   levelsOrder.forEach(l=> h+=`<th>${l}</th>`);
   h+='<th>Result</th></tr></thead><tbody>';
   modelsOrder.forEach(m=>{
-    h+=`<tr data-m="${cssEsc(m)}"><td>${shortName(m)}</td>`;
+    h+=`<tr data-m="${cssEsc(m)}"><td>${sn(m)}</td>`;
     levelsOrder.forEach(l=>{
       h+=`<td data-cell="${cssEsc(m)}||${l}"><span class="cellbox"><span class="bar"><i style="width:0%"></i></span><small>–</small></span></td>`;
     });
@@ -649,13 +668,13 @@ function onEvent(ev){
       bar.style.background = ev.error ? 'var(--bad)' : (td.dataset.dq>0 ? 'var(--warn)' : 'var(--accent)');
       lab.textContent = td.dataset.dq>0 ? `${s}/${n} ⚠${td.dataset.dq}` : `${s}/${n}`;
     }
-    if(ev.error) logLine(`<span class="no">✗ ${shortName(ev.model)} ${ev.level}: ${ev.error}</span>`);
-    else if(ev.disqualified) logLine(`<span class="no">⚠ ${shortName(ev.model)} ${ev.level}: disqualified — reply contained code</span>`);
+    if(ev.error) logLine(`<span class="no">✗ ${sn(ev.model)} ${ev.level}: ${esc(ev.error)}</span>`);
+    else if(ev.disqualified) logLine(`<span class="no">⚠ ${sn(ev.model)} ${ev.level}: disqualified — reply contained code</span>`);
   } else if(ev.ev==='level_done'){
     const td=cellFor(ev.model,ev.level);
     const pass = ev.pass_ratio>=passRatioNow();
     if(td){ td.querySelector('i').style.background = pass?'var(--good)':'var(--bad)'; }
-    logLine(`${pass?'<span class="ok">✓</span>':'<span class="no">✗</span>'} ${shortName(ev.model)} <b>${ev.level}</b> — ${ev.solved}/${ev.attempts} solved · cell ${(ev.cell_acc*100).toFixed(0)}%`);
+    logLine(`${pass?'<span class="ok">✓</span>':'<span class="no">✗</span>'} ${sn(ev.model)} <b>${ev.level}</b> — ${ev.solved}/${ev.attempts} solved · cell ${(ev.cell_acc*100).toFixed(0)}%`);
     $('dash').src='/report?t='+Date.now();
   } else if(ev.ev==='model_stop'){
     const r=$('mtableWrap').querySelector(`[data-res="${cssEsc(ev.model)}"]`);
@@ -664,9 +683,9 @@ function onEvent(ev){
     const r=$('mtableWrap').querySelector(`[data-res="${cssEsc(ev.model)}"]`);
     if(r){ if(ev.max_level){ r.textContent=ev.max_level; r.className='state-pass'; }
            else { r.textContent='none'; r.className='state-fail'; } }
-    logLine(`<span class="dim">→ ${shortName(ev.model)} highest cleared: ${ev.max_level||'none'}</span>`);
+    logLine(`<span class="dim">→ ${sn(ev.model)} highest cleared: ${ev.max_level||'none'}</span>`);
   } else if(ev.ev==='error'){
-    logLine(`<span class="no">ERROR: ${ev.message}</span>`); setState('err','error');
+    logLine(`<span class="no">ERROR: ${esc(ev.message)}</span>`); setState('err','error');
   } else if(ev.ev==='done'){
     finish(ev.stopped);
   }
@@ -688,8 +707,8 @@ $('runBtn').onclick = async ()=>{
   try{
     res = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(collectCfg())}).then(r=>r.json());
-  }catch(e){ setState('err','error'); logLine('<span class="no">'+e+'</span>'); $('runBtn').disabled=false; return; }
-  if(res.error){ setState('err','error'); $('mtableWrap').innerHTML=`<p class="hint" style="color:var(--bad);margin-top:12px">${res.error}</p>`; $('runBtn').disabled=false; return; }
+  }catch(e){ setState('err','error'); logLine('<span class="no">'+esc(e)+'</span>'); $('runBtn').disabled=false; return; }
+  if(res.error){ setState('err','error'); $('mtableWrap').innerHTML=`<p class="hint" style="color:var(--bad);margin-top:12px">${esc(res.error)}</p>`; $('runBtn').disabled=false; return; }
   runId=res.id; setState('run','running'); $('stopBtn').disabled=false;
   es = new EventSource('/api/events?id='+encodeURIComponent(runId));
   es.onmessage = e => onEvent(JSON.parse(e.data));
@@ -711,7 +730,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="bind address; keep 127.0.0.1 unless you understand the exposure")
     ap.add_argument("--results", default="results.jsonl")
     a = ap.parse_args()
 
@@ -722,6 +742,10 @@ def main():
     url = f"http://{a.host}:{a.port}"
     print(f"Zebra Bench runner on {url}")
     print(f"  results file: {RESULTS_FILE}")
+    if a.host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"  WARNING: bound to {a.host}, not loopback — anyone who can reach this port can\n"
+              "           submit runs (API keys typed into the page) and set the target base URL\n"
+              "           the server calls. Only do this on a network you trust.")
     print("  Ctrl-C to stop")
     try:
         srv.serve_forever()

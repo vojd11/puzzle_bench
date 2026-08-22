@@ -66,7 +66,6 @@ def build_payload(rows, pass_ratio):
                 "solved": solved,
                 "pass_rate": pr,
                 "cell_acc": mean([r.get("cell_acc") for r in rs]),
-                "answer_acc": mean([1.0 if r.get("answer_correct") else 0.0 for r in rs]),
                 "latency": mean([r.get("latency") for r in rs]),
                 "ptokens": mean([r.get("prompt_tokens") for r in rs]),
                 "ctokens": mean([r.get("completion_tokens") for r in rs]),
@@ -301,6 +300,10 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 const fmtPct = x => (x*100).toFixed(0)+'%';
 const fmtPct1 = x => (x*100).toFixed(1)+'%';
 const shortName = m => m.includes('/') ? m.split('/').slice(-1)[0] : m;
+// HTML-escape anything data-derived (model names) before it goes into innerHTML.
+const esc = s => String(s).replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sn = m => esc(shortName(m));   // safe short name for HTML contexts
 const clip = (s,n=13) => s.length>n ? s.slice(0,n-1)+'…' : s;
 
 function el(tag, attrs={}, parent=null){
@@ -340,9 +343,9 @@ function renderTiles(){
   let bestCell=-1, bestCellM='—';
   for(const m of DATA.models){ const c=DATA.totals[m].cell_acc; if(c>bestCell){bestCell=c; bestCellM=m;} }
   const tiles = [
-    {k:'Top model', v:shortName(best), note:`cleared ${bestLv}`},
-    {k:'Hardest level cleared', v:hardest>=0?DATA.levels[hardest]:'none', note:`by ${shortName(hardestModel)}`},
-    {k:'Best cell accuracy', v:fmtPct(bestCell), note:shortName(bestCellM)},
+    {k:'Top model', v:sn(best), note:`cleared ${bestLv}`},
+    {k:'Hardest level cleared', v:hardest>=0?DATA.levels[hardest]:'none', note:`by ${sn(hardestModel)}`},
+    {k:'Best cell accuracy', v:fmtPct(bestCell), note:sn(bestCellM)},
     {k:'Total attempts', v:String(DATA.n_rows), note:`${DATA.models.length} models`},
   ];
   document.getElementById('tiles').innerHTML = tiles.map(t=>
@@ -357,7 +360,7 @@ function renderLegend(){
   DATA.order.forEach(m=>{
     const c = document.createElement('div');
     c.className='chip'+(active.has(m)?'':' off');
-    c.innerHTML = `<span class="sw" style="background:${color(DATA.order.indexOf(m))}"></span><span class="name">${shortName(m)}</span>`;
+    c.innerHTML = `<span class="sw" style="background:${color(DATA.order.indexOf(m))}"></span><span class="name">${sn(m)}</span>`;
     c.onclick = ()=>{
       if(active.has(m)) active.delete(m); else active.add(m);
       if(active.size===0) active.add(m); // never empty
@@ -401,7 +404,7 @@ function renderLadder(){
       const rect=el('rect',{x:padL,y,width:Math.max(w,3),height:bh,rx:6,fill:color(DATA.order.indexOf(m))},svg);
       rect.style.cursor='pointer';
       rect.addEventListener('mousemove',e=>showTT(
-        `<div class="h">${shortName(m)}</div>cleared up to <b>${DATA.levels[idx]}</b>`,e));
+        `<div class="h">${sn(m)}</div>cleared up to <b>${DATA.levels[idx]}</b>`,e));
       rect.addEventListener('mouseleave',hideTT);
     }
     const lbl=el('text',{x:padL-12,y:y+bh/2+4,'text-anchor':'end',class:'mk-lbl'},svg);
@@ -441,14 +444,13 @@ function renderPass(){
       const d=DATA.per[m][L];
       if(!d) return;
       const bx=cx-(n*gw)/2+mi*gw+1;
-      const bh=plotH*(1-(1-d.pass_rate));
       const val=d.pass_rate;
       const hh=plotH*val;
       const rect=el('rect',{x:bx,y:y(val),width:gw-2,height:Math.max(hh,val>0?2:0),rx:3,
         fill:color(DATA.order.indexOf(m))},svg);
       rect.style.cursor='pointer';
       rect.addEventListener('mousemove',e=>showTT(
-        `<div class="h">${shortName(m)} · ${L}</div>`+
+        `<div class="h">${sn(m)} · ${L}</div>`+
         `<div class="row"><span class="lft"><span class="sw" style="background:${color(DATA.order.indexOf(m))}"></span>solve rate</span><b>${fmtPct1(val)}</b></div>`+
         `<div class="row"><span class="lft">solved</span><b>${d.solved}/${d.n}</b></div>`,e));
       rect.addEventListener('mouseleave',hideTT);
@@ -498,7 +500,7 @@ function lineChart(svgId, accessor, fmtY, yMax, yTicks){
       const c=el('circle',{cx:x(p[0]),cy:y(p[1]),r:4.5,fill:color(ci),class:'dot'},svg);
       c.style.cursor='pointer';
       c.addEventListener('mousemove',e=>showTT(
-        `<div class="h">${shortName(m)} · ${p[2]}</div>`+
+        `<div class="h">${sn(m)} · ${p[2]}</div>`+
         `<div class="row"><span class="lft"><span class="sw" style="background:${color(ci)}"></span>value</span><b>${fmtY(p[1])}</b></div>`,e));
       c.addEventListener('mouseleave',hideTT);
     });
@@ -587,7 +589,7 @@ function renderTable(){
       ? `<span class="badge" style="background:color-mix(in srgb,${color(r.ci)} 20%,transparent);color:var(--ink)">${r.cleared}</span>`
       : `<span class="badge" style="background:color-mix(in srgb,var(--bad) 16%,transparent)">none</span>`;
     const cells=[
-      `<td><span class="mdl">${sw}${shortName(r.model)}</span></td>`,
+      `<td><span class="mdl">${sw}${sn(r.model)}</span></td>`,
       `<td>${clearedBadge}</td>`,
       `<td class="num">${fmtPct1(r.solve)}</td>`,
       `<td class="num">${fmtPct1(r.cell)}</td>`,
