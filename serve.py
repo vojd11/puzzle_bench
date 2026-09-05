@@ -23,7 +23,6 @@ import argparse
 import concurrent.futures as cf
 import json
 import os
-import queue
 import random
 import re
 import threading
@@ -38,7 +37,7 @@ import zebra  # noqa: F401  (imported for side effects / availability check)
 
 RESULTS_FILE = "results.jsonl"
 WRITE_LOCK = threading.Lock()
-RUNS: dict = {}  # run_id -> {"q": Queue, "stop": Event, "done": bool}
+RUNS: dict = {}  # run_id -> {"events": [...], "cond": Condition, "stop": Event, "done": bool}
 LAST_PASS_RATIO = 0.67  # keeps the embedded dashboard consistent with the last run
 
 DEFAULT_LEVELS = "3x3,4x4,5x5,6x6,7x7"
@@ -114,11 +113,16 @@ def _tally(rec: dict) -> dict:
 
 
 def do_run(run_id: str, cfg: dict):
-    q = RUNS[run_id]["q"]
-    stop = RUNS[run_id]["stop"]
+    run = RUNS[run_id]
+    stop = run["stop"]
 
     def emit(ev: str, **kw):
-        q.put({"ev": ev, **kw})
+        # Append to a shared event log instead of handing events to a single
+        # queue consumer: any SSE connection — including one that reconnects —
+        # replays from the log, so no event is lost to a queue race.
+        with run["cond"]:
+            run["events"].append({"ev": ev, **kw})
+            run["cond"].notify_all()
 
     try:
         args = SimpleNamespace(
@@ -199,7 +203,9 @@ def do_run(run_id: str, cfg: dict):
         emit("error", message=f"{type(e).__name__}: {e}")
         emit("done", stopped=True)
     finally:
-        RUNS[run_id]["done"] = True
+        with run["cond"]:
+            run["done"] = True
+            run["cond"].notify_all()
 
 
 def validate_and_normalize(cfg: dict) -> dict:
@@ -324,7 +330,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": str(e)})
             _prune_runs()
             run_id = f"run-{int(time.time()*1000)}-{random.randint(1000,9999)}"
-            RUNS[run_id] = {"q": queue.Queue(), "stop": threading.Event(), "done": False}
+            RUNS[run_id] = {"events": [], "cond": threading.Condition(),
+                            "stop": threading.Event(), "done": False}
             threading.Thread(target=do_run, args=(run_id, norm), daemon=True).start()
             return self._json(200, {"id": run_id, "models": norm["models"]})
 
@@ -356,29 +363,44 @@ class Handler(BaseHTTPRequestHandler):
         run = RUNS.get(run_id)
         if not run:
             return self._json(404, {"error": "unknown run id"})
+        # EventSource auto-reconnect sends Last-Event-ID, so a client that
+        # dropped (network blip, laptop sleep) resumes where it left off; a
+        # fresh connection replays the whole run from the start.
+        try:
+            idx = int(self.headers.get("Last-Event-ID") or -1)
+        except ValueError:
+            idx = -1
+        events, cond = run["events"], run["cond"]
         self.close_connection = True  # streaming, no Content-Length -> close when done
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
-        q = run["q"]
         try:
             while True:
-                try:
-                    ev = q.get(timeout=15)
-                except queue.Empty:
+                with cond:
+                    if idx + 1 >= len(events) and not run["done"]:
+                        cond.wait(timeout=15)
+                    new = events[idx + 1:]
+                    idx = len(events) - 1
+                    finished = run["done"] and idx + 1 >= len(events)
+                if not new:
+                    if finished:
+                        break
                     self.wfile.write(b": keep-alive\n\n")
                     self.wfile.flush()
-                    if run["done"]:
-                        break
                     continue
-                self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
+                for off, ev in enumerate(new):
+                    self.wfile.write(
+                        f"id: {idx - len(new) + off + 1}\ndata: {json.dumps(ev)}\n\n".encode())
                 self.wfile.flush()
-                if ev.get("ev") == "done":
+                if finished:
                     break
-        except (BrokenPipeError, ConnectionResetError):
-            run["stop"].set()  # client went away — stop the run
+        except OSError:
+            # client went away — the run keeps going (results land in the
+            # results file); it can reconnect and resume via Last-Event-ID
+            pass
 
 
 # ------------------------------------------------------------------ page ----
@@ -712,7 +734,7 @@ $('runBtn').onclick = async ()=>{
   runId=res.id; setState('run','running'); $('stopBtn').disabled=false;
   es = new EventSource('/api/events?id='+encodeURIComponent(runId));
   es.onmessage = e => onEvent(JSON.parse(e.data));
-  es.onerror = ()=>{ /* keep-alive gaps are normal; SSE auto-retries */ };
+  es.onerror = ()=>{ /* dropped connections auto-retry and resume via Last-Event-ID */ };
 };
 
 $('stopBtn').onclick = async ()=>{
