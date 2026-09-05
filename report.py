@@ -115,9 +115,17 @@ def build_payload(rows, pass_ratio):
     }
 
 
+def _esc(s) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
 def render_html(payload, title):
-    data_json = json.dumps(payload, ensure_ascii=False)
-    return HTML_TEMPLATE.replace("__TITLE__", title).replace("__DATA__", data_json)
+    # "<" is escaped in the embedded JSON so a data-derived string (e.g. a
+    # model name read from a shared results.jsonl) can't close the <script>
+    # tag and inject HTML; JSON decodes \u003c back to "<" on the JS side.
+    data_json = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
+    return HTML_TEMPLATE.replace("__TITLE__", _esc(title)).replace("__DATA__", data_json)
 
 
 # ---------------------------------------------------------------- template ---
