@@ -33,7 +33,7 @@ from urllib.parse import urlparse, parse_qs
 
 import bench
 import report
-import zebra  # noqa: F401  (imported for side effects / availability check)
+import zebra
 
 RESULTS_FILE = "results.jsonl"
 WRITE_LOCK = threading.Lock()
@@ -96,6 +96,105 @@ def _write(rec: dict):
     with WRITE_LOCK:
         with open(RESULTS_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
+
+
+def _read_results() -> list:
+    try:
+        with open(RESULTS_FILE, encoding="utf-8") as f:
+            return [json.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        return []
+
+
+# ------------------------------------------------------------ manual mode ---
+# Workflow for models with no API (web chats, a friend, paper): generate a
+# puzzle here, copy the prompt into the model by hand, paste its reply back.
+# The graded attempt lands in the same results file (flagged "manual": true),
+# and every record keeps the puzzle seed so you can always see — and replay —
+# exactly which puzzle was sent.
+
+DIFFICULTIES = ("easy", "medium", "hard")
+
+
+def manual_puzzle(cfg: dict) -> dict:
+    seed = (cfg.get("seed") or "").strip()
+    if seed:
+        parsed = zebra.parse_seed(seed)
+        if not parsed:
+            raise ValueError("bad seed code — expected something like 4h4p-m-1a2b3c4d")
+        p = zebra.build_puzzle(parsed["N"], parsed["M"], parsed["difficulty"], parsed["num"])
+    else:
+        N, M = parse_levels(cfg.get("level") or "4x4")[0]
+        difficulty = cfg.get("difficulty") or "medium"
+        if difficulty not in DIFFICULTIES:
+            raise ValueError(f"difficulty must be one of {', '.join(DIFFICULTIES)}")
+        p = zebra.build_puzzle(N, M, difficulty, random.getrandbits(32))
+    return {
+        "seed": p["seed"],
+        "level": f"{p['N']}x{p['M']}",
+        "difficulty": p["difficulty"],
+        "clues": len(p["clue_texts"]),
+        "prompt": zebra.render_prompt(p),
+        "question": p["question"]["text"],
+        "expected_grid": p["solution_grid"],
+        "expected_answer": p["question"]["answer"],
+    }
+
+
+def manual_submit(cfg: dict) -> dict:
+    model = (cfg.get("model") or "").strip()
+    if not model:
+        raise ValueError("model name is required")
+    seed = (cfg.get("seed") or "").strip()
+    parsed = zebra.parse_seed(seed)
+    if not parsed:
+        raise ValueError("bad seed code — expected something like 4h4p-m-1a2b3c4d")
+    reply = cfg.get("reply") or ""
+    if not reply.strip():
+        raise ValueError("paste the model's reply first")
+    p = zebra.build_puzzle(parsed["N"], parsed["M"], parsed["difficulty"], parsed["num"])
+    lvl = f"{p['N']}x{p['M']}"
+
+    # attempt index = how many records this model already has at this level
+    attempt = sum(1 for r in _read_results()
+                  if r.get("model") == model and r.get("level") == lvl)
+    rec = {"model": model, "level": lvl, "N": p["N"], "M": p["M"], "attempt": attempt,
+           "seed": p["seed"], "clues": len(p["clue_texts"]),
+           "question": p["question"]["text"], "expected_answer": p["question"]["answer"],
+           "ts": time.strftime("%Y-%m-%d %H:%M:%S"), "manual": True}
+    rec.update(zebra.grade(p, reply))
+    obj = zebra.extract_json(reply)
+    rec["given_answer"] = obj.get("answer") if isinstance(obj, dict) else None
+    rec["code_flag"] = zebra.looks_like_code(reply)
+    if cfg.get("strict_no_code") and rec["code_flag"]:
+        rec.update({"correct": False, "grid_correct": False, "answer_correct": False,
+                    "cells_correct": 0, "cell_acc": 0.0, "disqualified": True})
+    rec.update({k: None for k in
+                ("latency", "prompt_tokens", "completion_tokens", "reasoning_tokens")})
+    rec["finish_reason"] = "manual"
+    rec["reply_chars"] = len(reply)
+    rec["reply"] = reply
+    rec["error"] = None
+    _write(rec)
+    return {"record": {k: rec.get(k) for k in
+                       ("model", "level", "seed", "ts", "attempt", "correct", "cell_acc",
+                        "parsed", "code_flag", "disqualified", "answer_correct",
+                        "grid_correct", "cells_correct", "cells_total", "given_answer")},
+            "expected_grid": p["solution_grid"],
+            "expected_answer": p["question"]["answer"]}
+
+
+def manual_history(limit: int = 60) -> list:
+    rows = [r for r in _read_results() if r.get("manual")]
+    rows.sort(key=lambda r: r.get("ts") or "")
+    out = []
+    for r in rows[-limit:]:
+        out.append({k: r.get(k) for k in
+                    ("ts", "model", "level", "seed", "clues", "correct", "cell_acc",
+                     "parsed", "code_flag", "disqualified", "given_answer",
+                     "expected_answer")})
+        out[-1]["answer_correct"] = r.get("answer_correct")
+    return out[::-1]
 
 
 def _tally(rec: dict) -> dict:
@@ -308,6 +407,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, PRESETS)
         elif u.path == "/api/events":
             self._sse(parse_qs(u.query).get("id", [""])[0])
+        elif u.path == "/api/manual/history":
+            self._json(200, manual_history())
         elif u.path == "/favicon.ico":
             self._send(204, b"")
         else:
@@ -340,6 +441,16 @@ class Handler(BaseHTTPRequestHandler):
             if rid in RUNS:
                 RUNS[rid]["stop"].set()
             return self._json(200, {"ok": True})
+
+        if u.path in ("/api/manual/puzzle", "/api/manual/submit"):
+            try:
+                if u.path == "/api/manual/puzzle":
+                    return self._json(200, manual_puzzle(cfg))
+                return self._json(200, manual_submit(cfg))
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
+            except Exception as e:
+                return self._json(500, {"error": f"{type(e).__name__}: {e}"})
 
         self._json(404, {"error": "not found"})
 
@@ -589,6 +700,52 @@ iframe{width:100%;height:1400px;border:1px solid var(--ring);border-radius:15px;
       </div>
     </div>
   </div>
+
+  <!-- ============ manual mode ============ -->
+  <div class="card" id="manualCard" style="margin-top:18px">
+    <h2>Manual mode — send a puzzle by hand</h2>
+    <p class="hint" style="margin-top:0">For models without an API (web chats and such): generate a puzzle, copy the prompt to the model yourself, paste its reply back. Results go to the same file and dashboard, and every entry keeps the puzzle seed so you always see which puzzle was sent.</p>
+
+    <div class="cols" style="grid-template-columns:380px 1fr;margin-top:8px">
+      <div>
+        <label>Model name</label>
+        <input id="manualModel" placeholder="gpt-5 (web)" spellcheck="false">
+
+        <label>Level (houses×properties)</label>
+        <input id="manualLevel" value="4x4" spellcheck="false">
+
+        <label>Difficulty</label>
+        <select id="manualDifficulty"><option>easy</option><option selected>medium</option><option>hard</option></select>
+
+        <label>Seed code <span class="hint" style="font-weight:400">(optional — replay a specific puzzle; overrides level/difficulty)</span></label>
+        <input id="manualSeed" placeholder="4h4p-m-1a2b3c4d" spellcheck="false">
+
+        <div class="btns"><button class="primary" id="genPuzzleBtn">Generate puzzle</button></div>
+        <div class="btns" style="margin-top:8px;display:none" id="manualActions">
+          <button class="ghost" id="copyPromptBtn">Copy prompt</button>
+          <button class="ghost" id="newSeedBtn">Generate another</button>
+        </div>
+        <div class="checkline" style="margin-top:14px;display:none" id="manualGradeRow"><input type="checkbox" id="manualStrict"><label for="manualStrict">Strict no-code — a reply containing code counts as a fail</label></div>
+        <div class="btns" style="display:none" id="manualGradeBtns"><button class="primary" id="gradeBtn">Grade &amp; save result</button></div>
+        <div id="manualVerdict" style="margin-top:10px;display:none"></div>
+      </div>
+
+      <div>
+        <div id="manualPuzzle" style="display:none">
+          <p class="hint" id="manualMeta" style="margin-top:0"></p>
+          <label>Prompt — copy and send it to the model</label>
+          <textarea id="manualPrompt" readonly style="min-height:180px;font-size:12.5px"></textarea>
+          <details style="margin-top:8px"><summary>Show expected answer (spoiler)</summary>
+            <pre id="manualExpected" style="font-size:12px;white-space:pre-wrap;color:var(--ink2)"></pre>
+          </details>
+          <label>Model reply — paste exactly what it answered</label>
+          <textarea id="manualReply" style="min-height:120px" spellcheck="false"></textarea>
+        </div>
+        <h2 style="margin-top:0" id="manualHistoryTitle">Sent puzzles</h2>
+        <div id="manualHistory"><p class="hint" style="margin:4px 0 0">Nothing sent yet.</p></div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -742,6 +899,92 @@ $('stopBtn').onclick = async ()=>{
   $('stopBtn').disabled=true; setState('run','stopping…');
   await fetch('/api/stop?id='+encodeURIComponent(runId),{method:'POST'});
 };
+
+// ---------- manual mode ----------
+let manualPuzzle = null;
+
+async function postJson(url, body){
+  try{
+    return await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body||{})}).then(r=>r.json());
+  }catch(e){ return {error:String(e)}; }
+}
+
+async function generatePuzzle(){
+  const btn=$('genPuzzleBtn'); btn.disabled=true;
+  const r=await postJson('/api/manual/puzzle',{
+    level:$('manualLevel').value, difficulty:$('manualDifficulty').value, seed:$('manualSeed').value});
+  btn.disabled=false;
+  if(r.error){ $('manualVerdict').innerHTML=`<p class="hint" style="color:var(--bad);margin:0">${esc(r.error)}</p>`; return; }
+  manualPuzzle=r;
+  $('manualSeed').value=r.seed;
+  $('manualMeta').innerHTML=`Puzzle <b>${esc(r.seed)}</b> · ${esc(r.level)} · ${esc(r.difficulty)} · ${r.clues} clues`;
+  $('manualPrompt').value=r.prompt;
+  $('manualExpected').textContent='grid: '+JSON.stringify(r.expected_grid,null,1)
+    +'\nanswer: '+r.expected_answer;
+  $('manualReply').value='';
+  $('manualVerdict').innerHTML=''; $('manualVerdict').style.display='none';
+  $('manualPuzzle').style.display='';
+  $('manualActions').style.display='';
+  $('manualGradeRow').style.display='';
+  $('manualGradeBtns').style.display='';
+  $('manualVerdict').style.display='';
+}
+
+$('copyPromptBtn').onclick = async ()=>{
+  const t=$('manualPrompt');
+  try{ await navigator.clipboard.writeText(t.value); }
+  catch(e){ t.select(); document.execCommand('copy'); }
+  const b=$('copyPromptBtn'), old=b.textContent;
+  b.textContent='Copied ✓'; setTimeout(()=>b.textContent=old,1200);
+};
+
+$('newSeedBtn').onclick = ()=>{ $('manualSeed').value=''; generatePuzzle(); };
+
+$('genPuzzleBtn').onclick = generatePuzzle;
+
+$('gradeBtn').onclick = async ()=>{
+  const btn=$('gradeBtn'); btn.disabled=true;
+  const r=await postJson('/api/manual/submit',{
+    model:$('manualModel').value, seed:manualPuzzle && manualPuzzle.seed,
+    reply:$('manualReply').value, strict_no_code:$('manualStrict').checked});
+  btn.disabled=false;
+  if(r.error){ $('manualVerdict').innerHTML=`<p class="hint" style="color:var(--bad);margin:0">${esc(r.error)}</p>`; return; }
+  const rec=r.record;
+  const pct=(rec.cell_acc*100).toFixed(0);
+  let badge, detail;
+  if(rec.disqualified){ badge='<span class="pill err">disqualified</span>';
+    detail='the reply contains code — counted as a fail (strict no-code)'; }
+  else if(rec.correct){ badge='<span class="pill done">correct</span>';
+    detail='full grid and the answer are right'; }
+  else { badge='<span class="pill err">incorrect</span>';
+    detail=`cells ${pct}% · answer ${rec.answer_correct?'right':'wrong'}`
+      +(rec.parsed?'':' · reply had no valid JSON'); }
+  $('manualVerdict').innerHTML=
+    `${badge} <span class="hint" style="display:inline">${esc(detail)}</span>`
+    +`<br><span class="hint">saved: ${esc(rec.model)} @ ${esc(rec.level)} — seed ${esc(rec.seed)} · expected answer: ${esc(r.expected_answer)}</span>`;
+  loadManualHistory();
+  $('dash').src='/report?t='+Date.now();
+};
+
+async function loadManualHistory(){
+  let rows=[];
+  try{ rows=await fetch('/api/manual/history').then(r=>r.json()); }catch(e){}
+  if(!rows.length){ $('manualHistory').innerHTML='<p class="hint" style="margin:4px 0 0">Nothing sent yet.</p>'; return; }
+  let h='<div style="max-height:260px;overflow:auto"><table class="mtable"><thead><tr>'
+    +'<th>When</th><th>Model</th><th>Level</th><th>Seed</th><th>Result</th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    const pct=((r.cell_acc||0)*100).toFixed(0);
+    let res;
+    if(r.disqualified) res=`<span class="state-fail">⚠ dq (code)</span>`;
+    else if(r.correct) res=`<span class="state-pass">✓ ${pct}%</span>`;
+    else res=`<span class="state-fail">✗ ${pct}%${r.parsed?'':' · unparsed'}</span>`;
+    h+=`<tr><td>${esc(r.ts||'')}</td><td>${esc(r.model||'')}</td><td>${esc(r.level||'')}</td>`
+      +`<td><code style="font-size:11px">${esc(r.seed||'')}</code></td><td>${res}</td></tr>`;
+  });
+  $('manualHistory').innerHTML=h+'</tbody></table></div>';
+}
+loadManualHistory();
 </script>
 </body>
 </html>
