@@ -115,14 +115,33 @@ def _read_results() -> list:
 
 DIFFICULTIES = ("easy", "medium", "hard")
 
+# Built puzzles are deterministic per seed, and building one runs the full
+# generator + uniqueness solver, so cache them: grading/saving a manual reply
+# must not regenerate the puzzle it was answered against.
+_PUZZLE_CACHE: dict = {}
+_PUZZLE_CACHE_MAX = 64
+_PUZZLE_CACHE_LOCK = threading.Lock()
+
+
+def _cached_puzzle(seed: str) -> dict:
+    parsed = zebra.parse_seed(seed)
+    if not parsed:
+        raise ValueError("bad seed code — expected something like 4h4p-m-1a2b3c4d")
+    with _PUZZLE_CACHE_LOCK:
+        p = _PUZZLE_CACHE.get(seed)
+    if p is None:
+        p = zebra.build_puzzle(parsed["N"], parsed["M"], parsed["difficulty"], parsed["num"])
+        with _PUZZLE_CACHE_LOCK:
+            if len(_PUZZLE_CACHE) >= _PUZZLE_CACHE_MAX:
+                _PUZZLE_CACHE.pop(next(iter(_PUZZLE_CACHE)))
+            _PUZZLE_CACHE[seed] = p
+    return p
+
 
 def manual_puzzle(cfg: dict) -> dict:
     seed = (cfg.get("seed") or "").strip()
     if seed:
-        parsed = zebra.parse_seed(seed)
-        if not parsed:
-            raise ValueError("bad seed code — expected something like 4h4p-m-1a2b3c4d")
-        p = zebra.build_puzzle(parsed["N"], parsed["M"], parsed["difficulty"], parsed["num"])
+        p = _cached_puzzle(seed)
     else:
         N, M = parse_levels(cfg.get("level") or "4x4")[0]
         difficulty = cfg.get("difficulty") or "medium"
@@ -142,17 +161,20 @@ def manual_puzzle(cfg: dict) -> dict:
 
 
 def manual_submit(cfg: dict) -> dict:
+    # save=False grades only (preview verdict) without touching the results file
+    save = cfg.get("save", True)
+    if not isinstance(save, bool):
+        save = bool(save)
     model = (cfg.get("model") or "").strip()
     if not model:
         raise ValueError("model name is required")
     seed = (cfg.get("seed") or "").strip()
-    parsed = zebra.parse_seed(seed)
-    if not parsed:
+    if not seed:
         raise ValueError("bad seed code — expected something like 4h4p-m-1a2b3c4d")
     reply = cfg.get("reply") or ""
     if not reply.strip():
         raise ValueError("paste the model's reply first")
-    p = zebra.build_puzzle(parsed["N"], parsed["M"], parsed["difficulty"], parsed["num"])
+    p = _cached_puzzle(seed)
     lvl = f"{p['N']}x{p['M']}"
 
     # attempt index = how many records this model already has at this level
@@ -175,11 +197,13 @@ def manual_submit(cfg: dict) -> dict:
     rec["reply_chars"] = len(reply)
     rec["reply"] = reply
     rec["error"] = None
-    _write(rec)
+    if save:
+        _write(rec)
     return {"record": {k: rec.get(k) for k in
                        ("model", "level", "seed", "ts", "attempt", "correct", "cell_acc",
                         "parsed", "code_flag", "disqualified", "answer_correct",
                         "grid_correct", "cells_correct", "cells_total", "given_answer")},
+            "saved": save,
             "expected_grid": p["solution_grid"],
             "expected_answer": p["question"]["answer"]}
 
@@ -726,7 +750,7 @@ iframe{width:100%;height:1400px;border:1px solid var(--ring);border-radius:15px;
           <button class="ghost" id="newSeedBtn">Generate another</button>
         </div>
         <div class="checkline" style="margin-top:14px;display:none" id="manualGradeRow"><input type="checkbox" id="manualStrict"><label for="manualStrict">Strict no-code — a reply containing code counts as a fail</label></div>
-        <div class="btns" style="display:none" id="manualGradeBtns"><button class="primary" id="gradeBtn">Grade &amp; save result</button></div>
+        <div class="btns" style="display:none" id="manualGradeBtns"><button class="primary" id="gradeBtn">Grade only</button><button class="ghost" id="saveBtn">Save result</button></div>
         <div id="manualVerdict" style="margin-top:10px;display:none"></div>
       </div>
 
@@ -943,12 +967,13 @@ $('newSeedBtn').onclick = ()=>{ $('manualSeed').value=''; generatePuzzle(); };
 
 $('genPuzzleBtn').onclick = generatePuzzle;
 
-$('gradeBtn').onclick = async ()=>{
-  const btn=$('gradeBtn'); btn.disabled=true;
+async function gradeMan(save){
+  const g=$('gradeBtn'), s=$('saveBtn');
+  g.disabled=true; s.disabled=true;
   const r=await postJson('/api/manual/submit',{
     model:$('manualModel').value, seed:manualPuzzle && manualPuzzle.seed,
-    reply:$('manualReply').value, strict_no_code:$('manualStrict').checked});
-  btn.disabled=false;
+    reply:$('manualReply').value, strict_no_code:$('manualStrict').checked, save});
+  g.disabled=false; s.disabled=false;
   if(r.error){ $('manualVerdict').innerHTML=`<p class="hint" style="color:var(--bad);margin:0">${esc(r.error)}</p>`; return; }
   const rec=r.record;
   const pct=(rec.cell_acc*100).toFixed(0);
@@ -960,12 +985,16 @@ $('gradeBtn').onclick = async ()=>{
   else { badge='<span class="pill err">incorrect</span>';
     detail=`cells ${pct}% · answer ${rec.answer_correct?'right':'wrong'}`
       +(rec.parsed?'':' · reply had no valid JSON'); }
+  const tail = r.saved
+    ? `<br><span class="hint">saved: ${esc(rec.model)} @ ${esc(rec.level)} — seed ${esc(rec.seed)} · expected answer: ${esc(r.expected_answer)}</span>`
+    : `<br><span class="hint">graded, not saved — press “Save result” to record it</span>`;
   $('manualVerdict').innerHTML=
-    `${badge} <span class="hint" style="display:inline">${esc(detail)}</span>`
-    +`<br><span class="hint">saved: ${esc(rec.model)} @ ${esc(rec.level)} — seed ${esc(rec.seed)} · expected answer: ${esc(r.expected_answer)}</span>`;
-  loadManualHistory();
-  $('dash').src='/report?t='+Date.now();
-};
+    `${badge} <span class="hint" style="display:inline">${esc(detail)}</span>${tail}`;
+  if(r.saved){ loadManualHistory(); $('dash').src='/report?t='+Date.now(); }
+}
+
+$('gradeBtn').onclick = ()=>gradeMan(false);
+$('saveBtn').onclick = ()=>gradeMan(true);
 
 async function loadManualHistory(){
   let rows=[];

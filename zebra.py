@@ -2,26 +2,72 @@
 
 Uses the same mulberry32 PRNG and the same algorithm order as the HTML page,
 so a seed string like "5h4p-m-b50737b4" produces the identical puzzle in both.
+
+Representation
+--------------
+A puzzle has N houses in a row and M property categories, each category holding
+N distinct values (one per house). Internally:
+
+    sol[c][h]        value index of category c in house h (the full solution)
+    masks[c][v]      bitmask of houses value v of category c could still occupy;
+                     bit h set means "house h+1" (bit 0 = house 1)
+
+Clue kinds (each constrains one or two category values):
+    pos   "X is in house h"                - fix one value to a house
+    same  "X is in the same house as Y"
+    diff  "X is not in the same house as Y"
+    imm   "X is directly to the left of Y" - exactly one house apart
+    adj   "X is next to Y"                 - one house apart, either side
+    ord   "X is somewhere to the left of Y"
+
+A clue dict looks like {"t": <kind>, "a": [cat, val], "b": [cat, val] | None,
+"h": <house>} where "h" is only present on "pos" clues.
 """
 from __future__ import annotations
 
 import json
 import re
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 DEFAULT_CATS: List[Dict] = [
-    {"name": "Color",       "values": ["Red", "Green", "Blue", "Yellow", "White", "Purple", "Orange"]},
-    {"name": "Nationality", "values": ["Brit", "Swede", "Dane", "German", "Norwegian", "Spaniard", "Italian"]},
-    {"name": "Drink",       "values": ["Tea", "Coffee", "Milk", "Beer", "Water", "Juice", "Wine"]},
-    {"name": "Pet",         "values": ["Dog", "Bird", "Cat", "Horse", "Fish", "Rabbit", "Turtle"]},
-    {"name": "Snack",       "values": ["Chips", "Cookies", "Popcorn", "Pretzels", "Nuts", "Candy", "Fruit"]},
-    {"name": "Hobby",       "values": ["Chess", "Painting", "Running", "Gardening", "Reading", "Cooking", "Photography"]},
-    {"name": "Job",         "values": ["Doctor", "Teacher", "Chef", "Pilot", "Artist", "Farmer", "Engineer"]},
-    {"name": "Flower",      "values": ["Rose", "Tulip", "Lily", "Daisy", "Orchid", "Iris", "Poppy"]},
+    {"name": "Color",       "values": ["Red", "Green", "Blue", "Yellow", "White", "Purple", "Orange",
+                                       "Black", "Pink", "Brown", "Gray", "Cyan", "Magenta", "Lime", "Teal", "Gold"]},
+    {"name": "Nationality", "values": ["Brit", "Swede", "Dane", "German", "Norwegian", "Spaniard", "Italian",
+                                       "Finn", "Pole", "Greek", "Russian", "Frenchman", "Brazilian", "Japanese", "Egyptian", "Mexican"]},
+    {"name": "Drink",       "values": ["Tea", "Coffee", "Milk", "Beer", "Water", "Juice", "Wine",
+                                       "Cola", "Cider", "Lemonade", "Smoothie", "Cocoa", "Brandy", "Rum", "Punch", "Shake"]},
+    {"name": "Pet",         "values": ["Dog", "Bird", "Cat", "Horse", "Fish", "Rabbit", "Turtle",
+                                       "Snake", "Hamster", "Parrot", "Goat", "Duck", "Ferret", "Canary", "Lizard", "Pig"]},
+    {"name": "Snack",       "values": ["Chips", "Cookies", "Popcorn", "Pretzels", "Nuts", "Candy", "Fruit",
+                                       "Crackers", "Donut", "Muffin", "Cheese", "Chocolate", "Granola", "Jerky", "Waffles", "Toast"]},
+    {"name": "Hobby",       "values": ["Chess", "Painting", "Running", "Gardening", "Reading", "Cooking", "Photography",
+                                       "Fishing", "Swimming", "Singing", "Knitting", "Writing", "Hiking", "Cycling", "Pottery", "Drawing"]},
+    {"name": "Job",         "values": ["Doctor", "Teacher", "Chef", "Pilot", "Artist", "Farmer", "Engineer",
+                                       "Lawyer", "Nurse", "Writer", "Baker", "Dentist", "Mechanic", "Astronomer", "Librarian", "Barber"]},
+    {"name": "Flower",      "values": ["Rose", "Tulip", "Lily", "Daisy", "Orchid", "Iris", "Poppy",
+                                       "Violet", "Sunflower", "Jasmine", "Lavender", "Marigold", "Peony", "Carnation", "Daffodil", "Azalea"]},
+    {"name": "Sport",       "values": ["Soccer", "Tennis", "Golf", "Rugby", "Cricket", "Boxing", "Skiing", "Rowing",
+                                       "Archery", "Volleyball", "Hockey", "Judo", "Curling", "Surfing", "Fencing", "Bowling"]},
+    {"name": "Instrument",  "values": ["Piano", "Violin", "Guitar", "Drums", "Flute", "Trumpet", "Cello", "Clarinet",
+                                       "Harp", "Saxophone", "Viola", "Banjo", "Accordion", "Harpsichord", "Organ", "Tuba"]},
+    {"name": "Car",         "values": ["Ford", "Toyota", "Honda", "BMW", "Audi", "Volvo", "Mazda", "Kia",
+                                       "Fiat", "Jeep", "Nissan", "Porsche", "Tesla", "Saab", "Renault", "Buick"]},
+    {"name": "Fruit",       "values": ["Apple", "Pear", "Peach", "Plum", "Cherry", "Mango", "Kiwi", "Melon",
+                                       "Apricot", "Fig", "Grape", "Lemon", "Banana", "Papaya", "Guava", "Olive"]},
+    {"name": "Animal",      "values": ["Lion", "Tiger", "Bear", "Wolf", "Fox", "Deer", "Eagle", "Shark",
+                                       "Whale", "Otter", "Badger", "Falcon", "Panther", "Moose", "Beaver", "Hawk"]},
+    {"name": "Gemstone",    "values": ["Diamond", "Ruby", "Sapphire", "Emerald", "Opal", "Topaz", "Jade", "Pearl",
+                                       "Amber", "Garnet", "Onyx", "Quartz", "Jasper", "Peridot", "Zircon", "Beryl"]},
+    {"name": "Tree",        "values": ["Oak", "Pine", "Birch", "Maple", "Cedar", "Willow", "Elm", "Ash",
+                                       "Beech", "Spruce", "Fir", "Aspen", "Redwood", "Sycamore", "Chestnut", "Walnut"]},
+    {"name": "Dessert",     "values": ["Cake", "Pie", "Sundae", "Brownie", "Tart", "Pudding", "Custard", "Sorbet",
+                                       "Macaron", "Cheesecake", "Cupcake", "Tiramisu", "Flan", "Strudel", "Baklava", "Fudge"]},
 ]
 
+# Difficulty letter used in seed codes -> full difficulty name.
 DIFFS = {"e": "easy", "m": "medium", "h": "hard"}
-M32 = 0xFFFFFFFF
+
+M32 = 0xFFFFFFFF  # keeps JS-number arithmetic in unsigned 32-bit range
 
 
 # ----------------------------------------------------------------- PRNG ----
@@ -41,6 +87,7 @@ def make_rng(seed: int) -> Callable[[], float]:
 
 
 def shuffle(arr: List, rnd: Callable[[], float]) -> List:
+    """Fisher-Yates shuffle in place (consumes rnd exactly like the JS code)."""
     for i in range(len(arr) - 1, 0, -1):
         j = int(rnd() * (i + 1))
         arr[i], arr[j] = arr[j], arr[i]
@@ -49,140 +96,218 @@ def shuffle(arr: List, rnd: Callable[[], float]) -> List:
 
 # --------------------------------------------------------------- solver ----
 def popcount(x: int) -> int:
+    """Number of set bits = number of remaining candidates in a mask."""
     return bin(x).count("1")
 
 
 def low_idx(x: int) -> int:
+    """Index of the lowest set bit."""
     return (x & -x).bit_length() - 1
 
 
 def high_idx(x: int) -> int:
+    """Index of the highest set bit."""
     return x.bit_length() - 1
 
 
-def init_masks(M: int, N: int) -> List[List[int]]:
-    all_ = (1 << N) - 1
-    return [[all_] * N for _ in range(M)]
+def init_masks(num_cats: int, num_houses: int) -> List[List[int]]:
+    """Initially every value of every category can be in any house."""
+    all_houses = (1 << num_houses) - 1
+    return [[all_houses] * num_houses for _ in range(num_cats)]
 
 
-def propagate(m: List[List[int]], clues: List[Dict], N: int) -> bool:
-    all_ = (1 << N) - 1
-    M = len(m)
+def apply_clue(masks: List[List[int]], clue: Dict, num_houses: int) -> int:
+    """Narrow the candidate masks touched by one clue, in place.
+
+    Returns the number of masks changed, or -1 on contradiction (an empty
+    candidate set or an impossible clue relation).
+    """
+    all_houses = (1 << num_houses) - 1
+    a_cat, a_val = clue["a"]
+    a = masks[a_cat][a_val]
+    b_cat = b_val = None
+    b = None
+    if clue.get("b") is not None:
+        b_cat, b_val = clue["b"]
+        b = masks[b_cat][b_val]
+    new_a, new_b = a, b
+    kind = clue["t"]
+
+    if kind == "pos":
+        new_a = a & (1 << clue["h"])
+    elif kind == "same":
+        new_a = a & b
+        new_b = new_a
+    elif kind == "diff":
+        if popcount(a) == 1:
+            new_b = b & ~a
+        if popcount(new_b) == 1:
+            new_a = a & ~new_b
+    elif kind == "imm":
+        # b sits exactly one house to the right of a
+        new_b = b & ((a << 1) & all_houses)
+        new_a = a & (new_b >> 1)
+    elif kind == "adj":
+        # b sits one house to the left or right of a
+        new_b = b & (((a << 1) | (a >> 1)) & all_houses)
+        new_a = a & (((new_b << 1) | (new_b >> 1)) & all_houses)
+    elif kind == "ord":
+        if a == 0 or b == 0:
+            return -1
+        # a must sit below b's best case; b must sit above a's worst case
+        new_a = a & ((1 << high_idx(b)) - 1)
+        if new_a == 0:
+            return -1
+        new_b = b & ~((1 << (low_idx(new_a) + 1)) - 1)
+
+    if new_a == 0 or new_b == 0:
+        return -1
+    changed = 0
+    if new_a != a:
+        masks[a_cat][a_val] = new_a
+        changed += 1
+    if new_b is not None and new_b != b:
+        masks[b_cat][b_val] = new_b
+        changed += 1
+    return changed
+
+
+def apply_row_rules(masks: List[List[int]], cat: int, num_houses: int) -> int:
+    """Permutation-row reductions for one category's row of masks, in place.
+
+    Returns the number of masks changed, or -1 on contradiction. Three classic
+    rules for "each house holds exactly one value of this category":
+      - naked single: a value with one candidate house loses it elsewhere
+      - hidden single: a house only one value can occupy belongs to that value
+      - Hall interval: k values confined to a k-house interval claim it whole,
+        so every other value must avoid the interval
+    """
+    row = masks[cat]
+    changed = 0
+
+    for val in range(num_houses):
+        if row[val] == 0:
+            return -1
+        if popcount(row[val]) != 1:
+            continue
+        for other in range(num_houses):
+            if other != val and (row[other] & row[val]):
+                row[other] &= ~row[val]
+                if row[other] == 0:
+                    return -1
+                changed += 1
+
+    for house in range(num_houses):
+        bit = 1 << house
+        fits = [val for val in range(num_houses) if row[val] & bit]
+        if not fits:
+            return -1
+        if len(fits) == 1 and row[fits[0]] != bit:
+            row[fits[0]] = bit
+            changed += 1
+
+    if num_houses > 3:
+        for lo in range(num_houses):
+            span = 0
+            for hi in range(lo, num_houses):
+                span |= 1 << hi
+                size = hi - lo + 1
+                confined = sum(1 for val in range(num_houses)
+                               if (row[val] & ~span) == 0)
+                if confined == size and size < num_houses:
+                    for val in range(num_houses):
+                        if row[val] & ~span:  # not one of the confined values
+                            trimmed = row[val] & ~span
+                            if trimmed and trimmed != row[val]:
+                                row[val] = trimmed
+                                changed += 1
+    return changed
+
+
+def propagate(masks: List[List[int]], clues: List[Dict], num_houses: int) -> bool:
+    """Run all clue and row rules until a fixed point.
+
+    Returns False on contradiction; otherwise masks hold the narrowed candidates.
+    """
+    num_cats = len(masks)
     changed = True
     while changed:
         changed = False
-        for cl in clues:
-            ac, av = cl["a"]
-            A = m[ac][av]
-            B = None
-            bc = bv = None
-            if cl.get("b") is not None:
-                bc, bv = cl["b"]
-                B = m[bc][bv]
-            nA, nB = A, B
-            t = cl["t"]
-            if t == "pos":
-                nA = A & (1 << cl["h"])
-            elif t == "same":
-                nA = A & B
-                nB = nA
-            elif t == "diff":
-                if popcount(A) == 1:
-                    nB = B & ~A
-                if popcount(nB) == 1:
-                    nA = A & ~nB
-            elif t == "imm":
-                nB = B & ((A << 1) & all_)
-                nA = A & (nB >> 1)
-            elif t == "adj":
-                nB = B & (((A << 1) | (A >> 1)) & all_)
-                nA = A & (((nB << 1) | (nB >> 1)) & all_)
-            elif t == "ord":
-                if A == 0 or B == 0:
-                    return False
-                nA = A & ((1 << high_idx(B)) - 1)
-                if nA == 0:
-                    return False
-                nB = B & ~((1 << (low_idx(nA) + 1)) - 1)
-            if nA == 0 or nB == 0:
+        for clue in clues:
+            n = apply_clue(masks, clue, num_houses)
+            if n < 0:
                 return False
-            if nA != A:
-                m[ac][av] = nA
-                changed = True
-            if nB is not None and nB != B:
-                m[bc][bv] = nB
-                changed = True
-
-        for c in range(M):
-            row = m[c]
-            for v in range(N):
-                if row[v] == 0:
-                    return False
-                if popcount(row[v]) == 1:
-                    for w in range(N):
-                        if w != v and (row[w] & row[v]):
-                            row[w] &= ~row[v]
-                            if row[w] == 0:
-                                return False
-                            changed = True
-            for h in range(N):
-                bit = 1 << h
-                cnt = 0
-                last = -1
-                for v in range(N):
-                    if row[v] & bit:
-                        cnt += 1
-                        last = v
-                if cnt == 0:
-                    return False
-                if cnt == 1 and row[last] != bit:
-                    row[last] = bit
-                    changed = True
+            changed = changed or n > 0
+        for cat in range(num_cats):
+            n = apply_row_rules(masks, cat, num_houses)
+            if n < 0:
+                return False
+            changed = changed or n > 0
     return True
 
 
-def solve(M: int, N: int, clues: List[Dict], limit: int = 2) -> List[List[List[int]]]:
-    """Returns up to `limit` solutions; sol[cat][house] = value index."""
-    out: List[List[List[int]]] = []
+def propagation_unique(num_cats: int, num_houses: int, clues: List[Dict]) -> Optional[bool]:
+    """Cheap uniqueness pre-check.
 
-    def rec(m: List[List[int]]) -> None:
-        if len(out) >= limit:
-            return
-        if not propagate(m, clues, N):
-            return
-        bc = bv = -1
-        best = 99
-        for c in range(M):
-            for v in range(N):
-                p = popcount(m[c][v])
-                if 1 < p < best:
-                    best, bc, bv = p, c, v
-        if bc < 0:
-            sol = []
-            for c in range(M):
-                r = [0] * N
-                for v in range(N):
-                    r[low_idx(m[c][v])] = v
-                sol.append(r)
-            out.append(sol)
-            return
-        bits = m[bc][bv]
-        while bits and len(out) < limit:
-            b = bits & -bits
-            bits ^= b
-            m2 = [row[:] for row in m]
-            m2[bc][bv] = b
-            rec(m2)
+    Returns True if constraint propagation alone fully determines the grid
+    (sound: propagation only eliminates impossible values, so a complete
+    singleton fixed point is the one and only solution). Returns None when
+    propagation is inconclusive and a real search is needed; False means the
+    clues are contradictory.
+    """
+    masks = init_masks(num_cats, num_houses)
+    if not propagate(masks, clues, num_houses):
+        return False
+    if all(popcount(mask) == 1 for row in masks for mask in row):
+        return True
+    return None
 
-    rec(init_masks(M, N))
-    return out
+
+def solve(num_cats: int, num_houses: int, clues: List[Dict], limit: int = 2) -> List[List[List[int]]]:
+    """Search for solutions; returns up to `limit` of them as sol[cat][house]."""
+    solutions: List[List[List[int]]] = []
+
+    def search(masks: List[List[int]]) -> None:
+        if len(solutions) >= limit:
+            return
+        if not propagate(masks, clues, num_houses):
+            return
+        # branch on the cell with the fewest remaining candidates
+        best_cat = best_val = -1
+        best_count = num_houses + 1
+        for cat in range(num_cats):
+            for val in range(num_houses):
+                count = popcount(masks[cat][val])
+                if 1 < count < best_count:
+                    best_count, best_cat, best_val = count, cat, val
+        if best_cat < 0:  # every cell is a singleton: record the solution
+            solution = []
+            for cat in range(num_cats):
+                by_house = [0] * num_houses
+                for val in range(num_houses):
+                    by_house[low_idx(masks[cat][val])] = val
+                solution.append(by_house)
+            solutions.append(solution)
+            return
+        remaining = masks[best_cat][best_val]
+        while remaining and len(solutions) < limit:
+            bit = remaining & -remaining
+            remaining ^= bit
+            branch_masks = [row[:] for row in masks]
+            branch_masks[best_cat][best_val] = bit
+            search(branch_masks)
+
+    search(init_masks(num_cats, num_houses))
+    return solutions
 
 
 # ------------------------------------------------------------ generator ----
-def house_of(sol, c, v):
-    return sol[c].index(v)
+def house_of(sol, cat: int, val: int) -> int:
+    """House index where category `cat` has value `val` in solution `sol`."""
+    return sol[cat].index(val)
 
 
+# Per-clue-kind probability of offering that kind to the puzzle, per difficulty.
 WEIGHTS = {
     "easy":   {"pos": 1.0,  "same": 1.0, "imm": 1.0, "adj": 0.8, "ord": 0.6, "diff": 0.15},
     "medium": {"pos": 0.35, "same": 0.8, "imm": 0.8, "adj": 0.8, "ord": 0.7, "diff": 0.3},
@@ -190,130 +315,173 @@ WEIGHTS = {
 }
 
 
-def build_pool(sol, M, N, rnd, difficulty):
+def build_pool(sol, num_cats: int, num_houses: int, rnd, difficulty: str) -> List[Dict]:
+    """Every possible clue about `sol`, kept with per-difficulty probability.
+
+    Positional clues are kept separately and appended after the shuffled main
+    pool (this order matters: the generator adds clues from the front until the
+    puzzle is unique, so positional clues act as a guaranteed backfill).
+    """
     pool: List[Dict] = []
-    pos_clues: List[Dict] = []
-    for c in range(M):
-        for v in range(N):
-            pos_clues.append({"t": "pos", "a": [c, v], "b": None, "h": house_of(sol, c, v)})
-    for c1 in range(M):
-        for v1 in range(N):
-            h1 = house_of(sol, c1, v1)
-            for c2 in range(M):
-                if c2 == c1:
+    positional_clues: List[Dict] = []
+    for cat in range(num_cats):
+        for val in range(num_houses):
+            positional_clues.append({"t": "pos", "a": [cat, val], "b": None,
+                                     "h": house_of(sol, cat, val)})
+    for cat_a in range(num_cats):
+        for val_a in range(num_houses):
+            house_a = house_of(sol, cat_a, val_a)
+            for cat_b in range(num_cats):
+                if cat_b == cat_a:
                     continue
-                for v2 in range(N):
-                    h2 = house_of(sol, c2, v2)
-                    a, b = [c1, v1], [c2, v2]
-                    if h1 == h2:
-                        if c1 < c2:
+                for val_b in range(num_houses):
+                    house_b = house_of(sol, cat_b, val_b)
+                    a, b = [cat_a, val_a], [cat_b, val_b]
+                    if house_a == house_b:
+                        if cat_a < cat_b:  # keep each unordered pair once
                             pool.append({"t": "same", "a": a, "b": b})
                     else:
-                        if h2 == h1 + 1:
+                        if house_b == house_a + 1:
                             pool.append({"t": "imm", "a": a, "b": b})
-                        if abs(h1 - h2) == 1 and c1 < c2:
+                        if abs(house_a - house_b) == 1 and cat_a < cat_b:
                             pool.append({"t": "adj", "a": a, "b": b})
-                        if h1 < h2:
+                        if house_a < house_b:
                             pool.append({"t": "ord", "a": a, "b": b})
-                        if c1 < c2:
+                        if cat_a < cat_b:
                             pool.append({"t": "diff", "a": a, "b": b})
-    w = WEIGHTS.get(difficulty, WEIGHTS["medium"])
-    picked = [c for c in pool if rnd() < w[c["t"]]]
-    picked_pos = [c for c in pos_clues if rnd() < w["pos"]]
-    main = shuffle(picked + picked_pos, rnd)
-    return main + shuffle(list(pos_clues), rnd)
+    weights = WEIGHTS.get(difficulty, WEIGHTS["medium"])
+    selected = [clue for clue in pool if rnd() < weights[clue["t"]]]
+    selected_positional = [c for c in positional_clues if rnd() < weights["pos"]]
+    pair_clues = shuffle(selected + selected_positional, rnd)
+    return pair_clues + shuffle(list(positional_clues), rnd)
 
 
-def generate(M: int, N: int, difficulty: str, rnd: Callable[[], float]) -> Optional[Dict]:
-    sol = [shuffle(list(range(N)), rnd) for _ in range(M)]  # sol[cat][house] = value idx
-    pool = build_pool(sol, M, N, rnd, difficulty)
+def is_unique(num_cats: int, num_houses: int, clues: List[Dict]) -> bool:
+    """True when the clues admit exactly one solution."""
+    fast = propagation_unique(num_cats, num_houses, clues)
+    if fast is not None:
+        return fast
+    return len(solve(num_cats, num_houses, clues, 2)) == 1
+
+
+def generate(num_cats: int, num_houses: int, difficulty: str,
+             rnd: Callable[[], float]) -> Optional[Dict]:
+    """Draw a random solution, then add clues until it is the only one.
+
+    Returns None if the pool runs out before the clues become unique.
+    """
+    sol = [shuffle(list(range(num_houses)), rnd) for _ in range(num_cats)]
+    pool = build_pool(sol, num_cats, num_houses, rnd, difficulty)
     clues: List[Dict] = []
-    for cl in pool:
-        clues.append(cl)
-        if len(clues) < max(3, M):
+    for clue in pool:
+        clues.append(clue)
+        if len(clues) < max(3, num_cats):
             continue
-        if len(solve(M, N, clues, 2)) == 1:
+        if is_unique(num_cats, num_houses, clues):
             break
-    if len(solve(M, N, clues, 2)) != 1:
+    if not is_unique(num_cats, num_houses, clues):
         return None
-    order = shuffle(list(range(len(clues))), rnd)
-    dead = set()
-    for i in order:
-        trial = [c for j, c in enumerate(clues) if j != i and j not in dead]
-        if len(solve(M, N, trial, 2)) == 1:
-            dead.add(i)
-    final = [c for j, c in enumerate(clues) if j not in dead]
-    return {"sol": sol, "clues": shuffle(final, rnd)}
+    # greedily drop clues that the puzzle still solves without
+    removal_order = shuffle(list(range(len(clues))), rnd)
+    redundant = set()
+    for i in removal_order:
+        trial_clues = [c for j, c in enumerate(clues) if j != i and j not in redundant]
+        if is_unique(num_cats, num_houses, trial_clues):
+            redundant.add(i)
+    kept_clues = [c for j, c in enumerate(clues) if j not in redundant]
+    return {"sol": sol, "clues": shuffle(kept_clues, rnd)}
 
 
-def make_question(sol, cats, N, rnd) -> Dict:
-    M = len(cats)
-    bi = int(rnd() * M)
-    ai = int(rnd() * M)
-    while ai == bi:
-        ai = int(rnd() * M)
-    house = int(rnd() * N)
-    av, bv = sol[ai][house], sol[bi][house]
-    A, B = cats[ai], cats[bi]
-    person = re.search(r"nation|people|person|name|who", B["name"], re.I)
-    text = (f"Who has {A['values'][av]} ({A['name']})?" if person
-            else f"Which {B['name']} belongs to the house with {A['values'][av]} ({A['name']})?")
-    return {"text": text, "cat": B["name"], "cat_idx": bi, "val_idx": bv, "answer": B["values"][bv]}
+def make_question(sol, cats, num_houses: int, rnd) -> Dict:
+    """Ask for one house's value in one category via another category."""
+    num_cats = len(cats)
+    asked_cat = int(rnd() * num_cats)
+    given_cat = int(rnd() * num_cats)
+    while given_cat == asked_cat:
+        given_cat = int(rnd() * num_cats)
+    house_idx = int(rnd() * num_houses)
+    given_val = sol[given_cat][house_idx]
+    answer_val = sol[asked_cat][house_idx]
+    given, asked = cats[given_cat], cats[asked_cat]
+    about_people = re.search(r"nation|people|person|name|who", asked["name"], re.I)
+    if about_people:
+        text = f"Who has {given['values'][given_val]} ({given['name']})?"
+    else:
+        text = (f"Which {asked['name']} belongs to the house with "
+                f"{given['values'][given_val]} ({given['name']})?")
+    return {"text": text, "cat": asked["name"], "cat_idx": asked_cat,
+            "val_idx": answer_val, "answer": asked["values"][answer_val]}
 
 
-def clue_text(cl: Dict, cats) -> str:
-    def it(x):
-        c, v = x
-        return f"{cats[c]['values'][v]} ({cats[c]['name']})"
-    A = it(cl["a"])
-    B = it(cl["b"]) if cl.get("b") else ""
-    t = cl["t"]
+def clue_text(clue: Dict, cats) -> str:
+    """Human-readable sentence for a clue dict."""
+    def item(x):
+        cat, val = x
+        return f"{cats[cat]['values'][val]} ({cats[cat]['name']})"
+
+    a = item(clue["a"])
+    b = item(clue["b"]) if clue.get("b") else ""
     return {
-        "pos":  f"{A} is in house {cl.get('h', -1) + 1}.",
-        "same": f"{A} is in the same house as {B}.",
-        "diff": f"{A} is not in the same house as {B}.",
-        "imm":  f"{A} is directly to the left of {B}.",
-        "adj":  f"{A} is next to {B}.",
-        "ord":  f"{A} is somewhere to the left of {B}.",
-    }[t]
+        "pos":  f"{a} is in house {clue.get('h', -1) + 1}.",
+        "same": f"{a} is in the same house as {b}.",
+        "diff": f"{a} is not in the same house as {b}.",
+        "imm":  f"{a} is directly to the left of {b}.",
+        "adj":  f"{a} is next to {b}.",
+        "ord":  f"{a} is somewhere to the left of {b}.",
+    }[clue["t"]]
 
 
 # ------------------------------------------------------------ seed codes ---
-def seed_code(N: int, M: int, difficulty: str, num: int) -> str:
-    return f"{N}h{M}p-{difficulty[0]}-{num & M32:08x}"
+def seed_code(num_houses: int, num_cats: int, difficulty: str, num: int) -> str:
+    """Seed string like "5h4p-m-b50737b4": N houses, M properties, difficulty, RNG seed."""
+    return f"{num_houses}h{num_cats}p-{difficulty[0]}-{num & M32:08x}"
 
 
 def parse_seed(code: str) -> Optional[Dict]:
-    m = re.fullmatch(r"(\d+)h(\d+)p-([emh])-([0-9a-fA-F]{1,8})", code.strip())
-    if not m:
+    """Inverse of seed_code; returns None for malformed codes."""
+    match = re.fullmatch(r"(\d+)h(\d+)p-([emh])-([0-9a-fA-F]{1,8})", code.strip())
+    if not match:
         return None
-    return {"N": int(m.group(1)), "M": int(m.group(2)),
-            "difficulty": DIFFS[m.group(3).lower()], "num": int(m.group(4), 16)}
+    return {"N": int(match.group(1)), "M": int(match.group(2)),
+            "difficulty": DIFFS[match.group(3).lower()],
+            "num": int(match.group(4), 16)}
+
+
+def _pad_values(name: str, values: List[str], n: int) -> List[str]:
+    """Extend a value list to length n with deterministic placeholder names."""
+    return (values + [f"{name} {i + 1}" for i in range(len(values), n)])[:n]
 
 
 def build_puzzle(N: int, M: int, difficulty: str = "medium", num: int = 0,
                  cats: Optional[List[Dict]] = None) -> Dict:
-    """Full puzzle for the given seed number. Mirrors the HTML page exactly."""
+    """Full puzzle for the given seed number. Mirrors the HTML page exactly.
+
+    N = number of houses, M = number of property categories.
+    """
     cats = cats or DEFAULT_CATS
-    cats = [{"name": c["name"], "values": c["values"][:N]} for c in cats[:M]]
+    cats = [{"name": c["name"], "values": _pad_values(c["name"], c["values"], N)}
+            for c in cats[:M]]
+    cats += [{"name": f"Property {i + 1}",
+              "values": [f"Value {j + 1}" for j in range(N)]}
+             for i in range(len(cats), M)]
     rnd = make_rng(num)
-    res = None
-    tries = 0
-    while res is None and tries < 5:
-        res = generate(M, N, difficulty, rnd)
-        tries += 1
-    if res is None:
+    result = None
+    attempts = 0
+    while result is None and attempts < 5:
+        result = generate(M, N, difficulty, rnd)
+        attempts += 1
+    if result is None:
         raise RuntimeError("generation failed")
-    question = make_question(res["sol"], cats, N, rnd)
+    question = make_question(result["sol"], cats, N, rnd)
     return {
         "seed": seed_code(N, M, difficulty, num),
         "N": N, "M": M, "difficulty": difficulty,
         "cats": cats,
-        "sol": res["sol"],
-        "clues": res["clues"],
-        "clue_texts": [clue_text(c, cats) for c in res["clues"]],
+        "sol": result["sol"],
+        "clues": result["clues"],
+        "clue_texts": [clue_text(c, cats) for c in result["clues"]],
         "question": question,
-        "solution_grid": {c["name"]: [c["values"][res["sol"][ci][h]] for h in range(N)]
+        "solution_grid": {c["name"]: [c["values"][result["sol"][ci][h]] for h in range(N)]
                           for ci, c in enumerate(cats)},
     }
 
@@ -349,6 +517,7 @@ Each property maps to a list of {N} values ordered by house number (house 1 firs
 
 
 def render_prompt(p: Dict) -> str:
+    """The exact prompt sent to the model for puzzle `p`."""
     cats = "\n".join(f"- {c['name']}: " + ", ".join(c["values"]) for c in p["cats"])
     clues = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(p["clue_texts"]))
     grid_example = ", ".join(
@@ -361,23 +530,24 @@ def render_prompt(p: Dict) -> str:
 
 # --------------------------------------------------------------- grading ---
 def _norm(s) -> str:
+    """Case/punctuation-insensitive key for comparing answers."""
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
 def extract_json(text: str) -> Optional[Dict]:
-    """Last complete top-level JSON object in the text."""
+    """Last complete top-level JSON object in the text containing a "grid" key."""
     text = re.sub(r"```(?:json)?", "", text)
-    starts = [i for i, ch in enumerate(text) if ch == "{"]
-    for i in reversed(starts):
+    brace_positions = [i for i, ch in enumerate(text) if ch == "{"]
+    for start in reversed(brace_positions):
         depth = 0
-        for j in range(i, len(text)):
-            if text[j] == "{":
+        for end in range(start, len(text)):
+            if text[end] == "{":
                 depth += 1
-            elif text[j] == "}":
+            elif text[end] == "}":
                 depth -= 1
                 if depth == 0:
                     try:
-                        obj = json.loads(text[i:j + 1])
+                        obj = json.loads(text[start:end + 1])
                         if isinstance(obj, dict) and "grid" in obj:
                             return obj
                     except Exception:
@@ -387,28 +557,28 @@ def extract_json(text: str) -> Optional[Dict]:
 
 
 def grade(p: Dict, reply: str) -> Dict:
-    obj = extract_json(reply)
-    N = p["N"]
-    total = N * p["M"]
-    if not obj or not isinstance(obj.get("grid"), dict):
-        return {"parsed": False, "cells_correct": 0, "cells_total": total,
+    """Score a model reply against the puzzle's known solution."""
+    reply_json = extract_json(reply)
+    num_cells = p["N"] * p["M"]
+    if not reply_json or not isinstance(reply_json.get("grid"), dict):
+        return {"parsed": False, "cells_correct": 0, "cells_total": num_cells,
                 "cell_acc": 0.0, "grid_correct": False, "answer_correct": False,
                 "correct": False}
-    truth = p["solution_grid"]
-    got = {_norm(k): v for k, v in obj["grid"].items()}
-    cells = 0
-    for name, vals in truth.items():
-        row = got.get(_norm(name))
-        if not isinstance(row, list):
+    expected_grid = p["solution_grid"]
+    submitted_grid = {_norm(k): v for k, v in reply_json["grid"].items()}
+    correct_cells = 0
+    for name, expected_vals in expected_grid.items():
+        submitted_row = submitted_grid.get(_norm(name))
+        if not isinstance(submitted_row, list):
             continue
-        for h, want in enumerate(vals):
-            if h < len(row) and _norm(row[h]) == _norm(want):
-                cells += 1
-    grid_ok = cells == total
-    ans_ok = _norm(obj.get("answer", "")) == _norm(p["question"]["answer"])
-    return {"parsed": True, "cells_correct": cells, "cells_total": total,
-            "cell_acc": cells / total, "grid_correct": grid_ok,
-            "answer_correct": ans_ok, "correct": grid_ok and ans_ok}
+        for house, expected in enumerate(expected_vals):
+            if house < len(submitted_row) and _norm(submitted_row[house]) == _norm(expected):
+                correct_cells += 1
+    grid_ok = correct_cells == num_cells
+    answer_ok = _norm(reply_json.get("answer", "")) == _norm(p["question"]["answer"])
+    return {"parsed": True, "cells_correct": correct_cells, "cells_total": num_cells,
+            "cell_acc": correct_cells / num_cells, "grid_correct": grid_ok,
+            "answer_correct": answer_ok, "correct": grid_ok and answer_ok}
 
 
 CODE_PATTERNS = re.compile(
@@ -419,14 +589,16 @@ CODE_PATTERNS = re.compile(
 
 
 def looks_like_code(reply: str) -> bool:
+    """Heuristic: did the model answer by writing code despite the rules?"""
     return bool(CODE_PATTERNS.search(reply))
 
 
 def solve_puzzle_answer(p: Dict) -> str:
     """Reference answer produced by the built-in solver (used by mock models)."""
-    sols = solve(p["M"], p["N"], p["clues"], 2)
-    sol = sols[0]
+    solutions = solve(p["M"], p["N"], p["clues"], 2)
+    sol = solutions[0]
     grid = {c["name"]: [c["values"][sol[ci][h]] for h in range(p["N"])]
             for ci, c in enumerate(p["cats"])}
-    q = p["question"]
-    return json.dumps({"grid": grid, "answer": grid[q["cat"]][sol[q["cat_idx"]].index(q["val_idx"])]})
+    question = p["question"]
+    return json.dumps({"grid": grid,
+                       "answer": grid[question["cat"]][sol[question["cat_idx"]].index(question["val_idx"])]})
