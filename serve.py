@@ -7,15 +7,19 @@
 Pure stdlib — nothing to install. The page is served from, and the LLM calls
 are made by, THIS local process, so:
 
-  * your API key is POSTed only to 127.0.0.1, kept in memory for the run, used
-    for the outbound calls, and never written to disk or logged;
+  * your API key is POSTed only to 127.0.0.1 and used for the outbound calls;
+    to spare you re-pasting it, the provider (base URL, key, model names) is
+    kept in the local SQLite file (bench.db, git-ignored) and offered back as
+    a "saved" preset on the next start;
   * there is no browser CORS problem (the browser talks to this server, the
     server talks to the provider).
 
-Progress streams live over Server-Sent Events; the embedded dashboard
-(report.py) re-renders after every level. Binds to 127.0.0.1 by default; pass
---host to change it, but note there is no auth — only expose it on a network you
-trust (the server prints a warning when bound off loopback).
+Puzzles, results and runs go to the same DB (results.jsonl is still written
+as a sibling, so plots.py/report.py keep working). Progress streams live over
+Server-Sent Events; the embedded dashboard (report.py) re-renders after every
+level. Binds to 127.0.0.1 by default; pass --host to change it, but note that
+there is no auth — only expose it on a network you trust (the server prints a
+warning when bound off loopback).
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse, parse_qs
 
 import bench
+import db
 import report
 import zebra
 
@@ -52,19 +57,23 @@ def _prune_runs():
 
 PRESETS = {
     "openai": {
+        "label": "OpenAI",
         "base_url": "https://api.openai.com/v1",
         "models": ["gpt-4o-mini", "gpt-4o", "o4-mini"],
     },
     "openrouter": {
+        "label": "OpenRouter",
         "base_url": "https://openrouter.ai/api/v1",
         "models": ["anthropic/claude-sonnet-4.5", "openai/gpt-5",
                    "google/gemini-2.5-pro", "meta-llama/llama-3.1-70b-instruct"],
     },
     "local": {
+        "label": "Local (Ollama / vLLM)",
         "base_url": "http://localhost:11434/v1",
         "models": ["llama3.1", "qwen2.5"],
     },
-    "mock": {"base_url": "", "models": ["mock-a", "mock-b"]},
+    "mock": {"label": "Mock — no key, offline self-test",
+             "base_url": "", "models": ["mock-a", "mock-b"]},
 }
 
 
@@ -92,13 +101,16 @@ def parse_levels(s: str):
     return out
 
 
-def _write(rec: dict):
+def _write(rec: dict, run_id=None):
     with WRITE_LOCK:
         with open(RESULTS_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
+    db.save_result(rec, run_id=run_id)
 
 
 def _read_results() -> list:
+    if db.is_enabled():
+        return db.load_results()
     try:
         with open(RESULTS_FILE, encoding="utf-8") as f:
             return [json.loads(l) for l in f if l.strip()]
@@ -117,7 +129,8 @@ DIFFICULTIES = ("easy", "medium", "hard")
 
 # Built puzzles are deterministic per seed, and building one runs the full
 # generator + uniqueness solver, so cache them: grading/saving a manual reply
-# must not regenerate the puzzle it was answered against.
+# must not regenerate the puzzle it was answered against. The DB is the
+# persistent tier of that cache (survives restarts); the dict is the hot tier.
 _PUZZLE_CACHE: dict = {}
 _PUZZLE_CACHE_MAX = 64
 _PUZZLE_CACHE_LOCK = threading.Lock()
@@ -130,7 +143,10 @@ def _cached_puzzle(seed: str) -> dict:
     with _PUZZLE_CACHE_LOCK:
         p = _PUZZLE_CACHE.get(seed)
     if p is None:
-        p = zebra.build_puzzle(parsed["N"], parsed["M"], parsed["difficulty"], parsed["num"])
+        p = db.get_puzzle(seed)
+        if p is None:
+            p = zebra.build_puzzle(parsed["N"], parsed["M"], parsed["difficulty"], parsed["num"])
+            db.save_puzzle(p)
         with _PUZZLE_CACHE_LOCK:
             if len(_PUZZLE_CACHE) >= _PUZZLE_CACHE_MAX:
                 _PUZZLE_CACHE.pop(next(iter(_PUZZLE_CACHE)))
@@ -148,6 +164,7 @@ def manual_puzzle(cfg: dict) -> dict:
         if difficulty not in DIFFICULTIES:
             raise ValueError(f"difficulty must be one of {', '.join(DIFFICULTIES)}")
         p = zebra.build_puzzle(N, M, difficulty, random.getrandbits(32))
+        db.save_puzzle(p)
     return {
         "seed": p["seed"],
         "level": f"{p['N']}x{p['M']}",
@@ -178,8 +195,11 @@ def manual_submit(cfg: dict) -> dict:
     lvl = f"{p['N']}x{p['M']}"
 
     # attempt index = how many records this model already has at this level
-    attempt = sum(1 for r in _read_results()
-                  if r.get("model") == model and r.get("level") == lvl)
+    if db.is_enabled():
+        attempt = db.count_attempts(model, lvl)
+    else:
+        attempt = sum(1 for r in _read_results()
+                      if r.get("model") == model and r.get("level") == lvl)
     rec = {"model": model, "level": lvl, "N": p["N"], "M": p["M"], "attempt": attempt,
            "seed": p["seed"], "clues": len(p["clue_texts"]),
            "question": p["question"]["text"], "expected_answer": p["question"]["answer"],
@@ -209,6 +229,8 @@ def manual_submit(cfg: dict) -> dict:
 
 
 def manual_history(limit: int = 60) -> list:
+    if db.is_enabled():
+        return db.manual_history(limit)
     rows = [r for r in _read_results() if r.get("manual")]
     rows.sort(key=lambda r: r.get("ts") or "")
     out = []
@@ -269,9 +291,13 @@ def do_run(run_id: str, cfg: dict):
         seed = str(cfg["seed"])
         models = cfg["models"]
 
+        # provenance row for this run (the api_key is filtered out by start_run)
+        run_id = db.start_run("ui", cfg)
+
         if cfg.get("fresh"):
             with WRITE_LOCK:
                 open(RESULTS_FILE, "w", encoding="utf-8").close()
+            db.clear_results()
 
         emit("start", models=models,
              levels=[f"{n}x{m}" for n, m in levels], attempts=attempts,
@@ -296,7 +322,7 @@ def do_run(run_id: str, cfg: dict):
                         for fut in cf.as_completed(futs):
                             rec = fut.result()
                             results.append(rec)
-                            _write(rec)
+                            _write(rec, run_id)
                             emit("attempt", model=model, level=lvl, **_tally(rec))
                 else:
                     for i, num in enumerate(nums):
@@ -304,7 +330,7 @@ def do_run(run_id: str, cfg: dict):
                             break
                         rec = bench.run_attempt(args, model, N, M, num, i)
                         results.append(rec)
-                        _write(rec)
+                        _write(rec, run_id)
                         emit("attempt", model=model, level=lvl, **_tally(rec))
                         time.sleep(float(cfg.get("sleep", 0) or 0))
                 if not results:
@@ -321,6 +347,7 @@ def do_run(run_id: str, cfg: dict):
                     emit("model_stop", model=model, level=lvl)
                     break
             emit("model_done", model=model, max_level=max_level)
+            db.finish_run(run_id, {"model": model, "max_level": max_level})
         emit("done", stopped=stop.is_set())
     except Exception as e:  # surface config / network errors to the UI
         emit("error", message=f"{type(e).__name__}: {e}")
@@ -349,6 +376,11 @@ def validate_and_normalize(cfg: dict) -> dict:
     api_key = (cfg.get("api_key") or "").strip()
     if not mock and not api_key:
         api_key = os.environ.get(cfg.get("api_key_env") or "OPENAI_API_KEY", "")
+    if not mock and not api_key:
+        # nothing pasted and nothing in the env — fall back to a key saved for
+        # this provider on an earlier run
+        saved = db.get_provider((cfg.get("base_url") or "").strip()) or {}
+        api_key = (saved.get("api_key") or "").strip()
     if not mock and not api_key:
         raise ValueError("API key is required (or pick a mock mode to test without one)")
 
@@ -428,7 +460,16 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/report":
             self._send(200, self._render_report().encode())
         elif u.path == "/api/presets":
-            self._json(200, PRESETS)
+            payload = dict(PRESETS)
+            for p in (db.list_providers() if db.is_enabled() else []):
+                # note: the api key itself is never sent to the browser — only
+                # that one exists; the server fills it in at run time
+                payload[f"saved:{p['id']}"] = {
+                    "label": p["label"], "base_url": p["base_url"],
+                    "models": p["models"], "saved": True, "has_key": p["has_key"],
+                    "tokens_param": p["tokens_param"],
+                }
+            self._json(200, payload)
         elif u.path == "/api/events":
             self._sse(parse_qs(u.query).get("id", [""])[0])
         elif u.path == "/api/manual/history":
@@ -453,6 +494,15 @@ class Handler(BaseHTTPRequestHandler):
                 norm = validate_and_normalize(cfg)
             except ValueError as e:
                 return self._json(400, {"error": str(e)})
+            if not norm["mock"]:
+                # remember the provider (base URL + key) and its model names so
+                # the next visit offers them back as a saved preset
+                preset = (cfg.get("preset") or "").strip()
+                label = preset if (preset in PRESETS
+                                   and PRESETS[preset].get("base_url") == norm["base_url"]) else None
+                pid = db.upsert_provider(norm["base_url"], norm["api_key"], label=label,
+                                         tokens_param=norm["tokens_param"])
+                db.remember_models(pid, norm["models"])
             _prune_runs()
             run_id = f"run-{int(time.time()*1000)}-{random.randint(1000,9999)}"
             RUNS[run_id] = {"events": [], "cond": threading.Condition(),
@@ -481,7 +531,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- helpers ----
     def _render_report(self) -> str:
         try:
-            rows = report.load(RESULTS_FILE)
+            rows = db.load_results() if db.is_enabled() else report.load(RESULTS_FILE)
         except (FileNotFoundError, SystemExit):
             rows = []
         if not rows:
@@ -646,7 +696,7 @@ iframe{width:100%;height:1400px;border:1px solid var(--ring);border-radius:15px;
       <div id="keyBlock">
         <label>API key</label>
         <input id="apiKey" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false">
-        <div class="keynote">🔒 <span>Sent only to this local process, kept in memory for the run, <b>never written to disk</b>.</span></div>
+        <div class="keynote">🔒 <span>Sent only to this local process. The provider &amp; key are kept in the <b>local DB</b> (bench.db, git-ignored) so saved presets can reuse them.</span></div>
       </div>
 
       <div id="mockBlock" style="display:none">
@@ -777,9 +827,22 @@ const $ = id => document.getElementById(id);
 let PRESETS = {};
 let es = null, runId = null, levelsOrder = [], modelsOrder = [], cells = {};
 
-fetch('/api/presets').then(r=>r.json()).then(p=>{ PRESETS=p; applyPreset(); });
+fetch('/api/presets').then(r=>r.json()).then(p=>{ PRESETS=p; buildPresetSelect(); applyPreset(); });
 
 $('preset').onchange = applyPreset;
+function buildPresetSelect(){
+  // rebuilt from /api/presets: the four built-ins, then every provider saved
+  // in the DB (its key stays server-side — the browser only learns it exists)
+  const sel=$('preset'), cur=sel.value;
+  sel.innerHTML='';
+  Object.entries(PRESETS).forEach(([k,v])=>{
+    const o=document.createElement('option');
+    o.value=k;
+    o.textContent = v.saved ? (v.label+' — saved') : v.label;
+    sel.appendChild(o);
+  });
+  if(cur && PRESETS[cur]) sel.value=cur;
+}
 function applyPreset(){
   const p = PRESETS[$('preset').value]; if(!p) return;
   $('baseUrl').value = p.base_url;
@@ -787,8 +850,9 @@ function applyPreset(){
   renderModelChips(p.models);
   const isMock = $('preset').value === 'mock';
   $('keyBlock').style.display = isMock ? 'none' : '';
-  $('mockBlock').style.display = isMock ? '' : '';
-  if($('preset').value === 'openai') { $('tokensParam').value='max_tokens'; }
+  $('mockBlock').style.display = isMock ? '' : 'none';
+  if(p.tokens_param) $('tokensParam').value = p.tokens_param;
+  $('apiKey').placeholder = (p.saved && p.has_key) ? 'saved — leave empty to reuse' : 'sk-…';
 }
 function renderModelChips(models){
   const box = $('modelChips'); box.innerHTML='';
@@ -807,6 +871,7 @@ function collectCfg(){
   const isMock = $('preset').value === 'mock';
   return {
     mock: isMock ? $('mockMode').value : '',
+    preset: $('preset').value,
     base_url: $('baseUrl').value,
     api_key: $('apiKey').value,
     models: $('models').value,
@@ -1027,15 +1092,26 @@ def main():
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address; keep 127.0.0.1 unless you understand the exposure")
     ap.add_argument("--results", default="results.jsonl")
+    ap.add_argument("--db", default=db.DEFAULT_DB,
+                    help="SQLite file for puzzles/results/providers ('' disables)")
     a = ap.parse_args()
 
     global RESULTS_FILE
     RESULTS_FILE = a.results
 
+    if a.db:
+        db.init(a.db)
+        # first start with an empty DB: pull the existing JSONL history in, so
+        # the dashboard and manual history don't start from zero
+        if not db.load_results() and os.path.exists(RESULTS_FILE):
+            n = db.import_jsonl(RESULTS_FILE)
+            if n:
+                print(f"  imported {n} rows from {RESULTS_FILE} into {a.db}")
+
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     url = f"http://{a.host}:{a.port}"
     print(f"Zebra Bench runner on {url}")
-    print(f"  results file: {RESULTS_FILE}")
+    print(f"  results file: {RESULTS_FILE}" + (f"; db: {a.db}" if a.db else ""))
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         print(f"  WARNING: bound to {a.host}, not loopback — anyone who can reach this port can\n"
               "           submit runs (API keys typed into the page) and set the target base URL\n"

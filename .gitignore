@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 .venv/
+
+# local SQLite storage — holds API keys and live results, never commit it
+*.db
+*.db-wal
+*.db-shm

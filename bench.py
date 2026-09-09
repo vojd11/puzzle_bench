@@ -30,6 +30,7 @@ import urllib.error
 import urllib.request
 from typing import Dict, List, Optional
 
+import db
 import zebra
 
 DEFAULT_LEVELS = [(3, 3), (4, 4), (5, 5), (6, 6), (7, 7)]
@@ -108,6 +109,7 @@ def mock_reply(p: Dict, mode: str) -> Dict:
 # ------------------------------------------------------------- benchmark ---
 def run_attempt(args, model: str, N: int, M: int, num: int, idx: int) -> Dict:
     p = zebra.build_puzzle(N, M, args.difficulty, num)
+    db.save_puzzle(p)
     prompt = zebra.render_prompt(p)
     rec = {"model": model, "level": f"{N}x{M}", "N": N, "M": M, "attempt": idx,
            "seed": p["seed"], "clues": len(p["clue_texts"]),
@@ -163,6 +165,7 @@ def run_model(args, model: str, out) -> Dict:
                 time.sleep(args.sleep)
         for r in results:
             out.write(json.dumps(r) + "\n")
+            db.save_result(r, run_id=getattr(args, "run_id", None))
         out.flush()
         ok = sum(1 for r in results if r["correct"])
         acc = sum(r.get("cell_acc") or 0 for r in results) / len(results)
@@ -182,6 +185,7 @@ def run_model(args, model: str, out) -> Dict:
             print(f"  -> stopped at {N}x{M}", flush=True)
             break
     print(f"  highest level passed: {summary['max_level'] or 'none'}", flush=True)
+    db.finish_run(getattr(args, "run_id", None), summary)
     return summary
 
 
@@ -206,6 +210,8 @@ def main() -> None:
     ap.add_argument("--sleep", type=float, default=0.0)
     ap.add_argument("--seed", default="zebra-bench-v1", help="base seed; same seeds => same puzzles for every model")
     ap.add_argument("--out", default="results.jsonl")
+    ap.add_argument("--db", default=db.DEFAULT_DB,
+                    help="SQLite file for puzzles/results/providers ('' disables)")
     ap.add_argument("--save-replies", action="store_true")
     ap.add_argument("--mock", choices=["perfect", "noisy", "dumb"], help="offline self-test, no API calls")
     ap.add_argument("--dry-run", action="store_true", help="print one prompt and exit")
@@ -232,6 +238,19 @@ def main() -> None:
     if not args.mock and not args.api_key:
         sys.exit(f"missing API key in ${args.api_key_env}")
 
+    if args.db:
+        db.init(args.db)
+        args.run_id = db.start_run("cli", {
+            "base_url": args.base_url, "models": models, "levels":
+            [f"{n}x{m}" for (n, m) in args.levels], "attempts": args.attempts,
+            "pass_ratio": args.pass_ratio, "difficulty": args.difficulty,
+            "seed": args.seed, "strict_no_code": args.strict_no_code,
+            "mock": args.mock})
+        if not args.mock:
+            pid = db.upsert_provider(args.base_url, args.api_key,
+                                     tokens_param=args.tokens_param)
+            db.remember_models(pid, models)
+
     summaries = []
     with open(args.out, "a", encoding="utf-8") as out:
         for model in models:
@@ -240,7 +259,8 @@ def main() -> None:
     print("\n=== summary ===")
     for s in summaries:
         print(f"{s['model']}: highest passed = {s['max_level'] or 'none'}")
-    print(f"\nresults -> {args.out}\nnow run:  python plots.py {args.out}")
+    print(f"\nresults -> {args.out}" + (f" and {args.db}" if args.db else ""))
+    print(f"now run:  python plots.py {args.out}")
 
 
 if __name__ == "__main__":
