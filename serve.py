@@ -157,14 +157,23 @@ def _cached_puzzle(seed: str) -> dict:
 def manual_puzzle(cfg: dict) -> dict:
     seed = (cfg.get("seed") or "").strip()
     if seed:
-        p = _cached_puzzle(seed)
+        p = _cached_puzzle(seed)  # replay: DB-first via the cache, build only on a miss
     else:
         N, M = parse_levels(cfg.get("level") or "4x4")[0]
         difficulty = cfg.get("difficulty") or "medium"
         if difficulty not in DIFFICULTIES:
             raise ValueError(f"difficulty must be one of {', '.join(DIFFICULTIES)}")
-        p = zebra.build_puzzle(N, M, difficulty, random.getrandbits(32))
-        db.save_puzzle(p)
+        # DB first: serve a stored puzzle of this level/difficulty that manual
+        # mode hasn't sent yet; only generate a brand-new one when the pool has
+        # nothing unused (or storage is off). A previously sent puzzle would
+        # just duplicate an attempt, so "used" disqualifies it here.
+        unused = [s for s in db.list_puzzle_seeds(N, M, difficulty)
+                  if s not in db.manual_used_seeds()]
+        if unused:
+            p = _cached_puzzle(random.choice(unused))
+        else:
+            p = zebra.build_puzzle(N, M, difficulty, random.getrandbits(32))
+            db.save_puzzle(p)
     return {
         "seed": p["seed"],
         "level": f"{p['N']}x{p['M']}",
@@ -290,6 +299,9 @@ def do_run(run_id: str, cfg: dict):
         parallel = max(1, int(cfg["parallel"]))
         seed = str(cfg["seed"])
         models = cfg["models"]
+        # puzzle plan computed once per run from the base seed, so every model
+        # faces the identical puzzle set (paired comparison)
+        plan = bench.plan_puzzles(levels, attempts, args.difficulty, seed)
 
         # provenance row for this run (the api_key is filtered out by start_run)
         run_id = db.start_run("ui", cfg)
@@ -307,32 +319,36 @@ def do_run(run_id: str, cfg: dict):
             if stop.is_set():
                 break
             emit("model_start", model=model)
-            rng = random.Random(seed)  # base seed only -> same puzzles for every model
             max_level = None
             for (N, M) in levels:
                 if stop.is_set():
                     break
                 lvl = f"{N}x{M}"
-                nums = [rng.getrandbits(32) for _ in range(attempts)]
+                recipes = plan[(N, M)]
                 results = []
-                if parallel > 1 and not args.mock:
-                    with cf.ThreadPoolExecutor(max_workers=parallel) as ex:
-                        futs = {ex.submit(bench.run_attempt, args, model, N, M, num, i): i
-                                for i, num in enumerate(nums)}
-                        for fut in cf.as_completed(futs):
-                            rec = fut.result()
+                pf = bench.start_prefetch(args.difficulty, N, M, recipes)
+                try:
+                    if parallel > 1 and not args.mock:
+                        with cf.ThreadPoolExecutor(max_workers=parallel) as ex:
+                            futs = {ex.submit(bench.attempt_from_recipe,
+                                              args, model, N, M, recipe, i): i
+                                    for i, recipe in enumerate(recipes)}
+                            for fut in cf.as_completed(futs):
+                                rec = fut.result()
+                                results.append(rec)
+                                _write(rec, run_id)
+                                emit("attempt", model=model, level=lvl, **_tally(rec))
+                    else:
+                        for i, recipe in enumerate(recipes):
+                            if stop.is_set():
+                                break
+                            rec = bench.attempt_from_recipe(args, model, N, M, recipe, i)
                             results.append(rec)
                             _write(rec, run_id)
                             emit("attempt", model=model, level=lvl, **_tally(rec))
-                else:
-                    for i, num in enumerate(nums):
-                        if stop.is_set():
-                            break
-                        rec = bench.run_attempt(args, model, N, M, num, i)
-                        results.append(rec)
-                        _write(rec, run_id)
-                        emit("attempt", model=model, level=lvl, **_tally(rec))
-                        time.sleep(float(cfg.get("sleep", 0) or 0))
+                            time.sleep(float(cfg.get("sleep", 0) or 0))
+                finally:
+                    pf.stop()
                 if not results:
                     break
                 ok = sum(1 for r in results if r.get("correct"))

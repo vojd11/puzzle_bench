@@ -8,6 +8,12 @@ by the prompt, and replies that look like code are flagged.
 A level is passed if the share of fully correct answers >= --pass-ratio;
 the ladder stops at the first failed level.
 
+Puzzles are cached in the SQLite DB (bench.db): at each level up to
+attempts-1 attempts reuse random puzzles already stored there (deterministically
+chosen, so every model still faces the identical puzzle set), the remaining
+attempt uses a fresh puzzle that a background thread generates while the level
+runs — and that new puzzle joins the pool for future runs.
+
 Examples
 --------
   export OPENAI_API_KEY=sk-...
@@ -25,6 +31,7 @@ import json
 import os
 import random
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -107,11 +114,115 @@ def mock_reply(p: Dict, mode: str) -> Dict:
 
 
 # ------------------------------------------------------------- benchmark ---
-def run_attempt(args, model: str, N: int, M: int, num: int, idx: int) -> Dict:
-    p = zebra.build_puzzle(N, M, args.difficulty, num)
-    db.save_puzzle(p)
+# ---------------------------------------------------------- puzzle sources --
+def obtain_puzzle(N: int, M: int, difficulty: str, num: int) -> Dict:
+    """Puzzle for a seed, loaded from the DB cache when it's already there.
+
+    build_puzzle runs the full generator + uniqueness solver, so repeat runs
+    (and every model after the first in a paired run) reuse the stored copy;
+    only a cache miss pays for generation, and the build is stored for next time.
+    """
+    seed = zebra.seed_code(N, M, difficulty, num)
+    p = db.get_puzzle(seed)
+    if p is None:
+        p = zebra.build_puzzle(N, M, difficulty, num)
+        db.save_puzzle(p)
+    return p
+
+
+def plan_puzzles(levels, attempts: int, difficulty: str, base_seed: str) -> Dict:
+    """Decide where each attempt's puzzle comes from — once per run.
+
+    Up to attempts-1 slots per level take random puzzles from the stored DB
+    pool (if there are that many); the remaining slots get freshly generated
+    puzzles. The picks are derived from the base seed only (never from the
+    model name), so every model in the run gets the identical puzzle at each
+    (level, attempt) — the paired comparison the --seed help promises.
+
+    Recipes: ("seed", code) reuses a stored puzzle; ("gen", num) loads or
+    builds the puzzle for that RNG number. Generated numbers skip seeds
+    already in the pool, so a rerun keeps adding new puzzles instead of
+    repeating stored ones, and no puzzle appears twice within a level.
+    """
+    plan = {}
+    for (N, M) in levels:
+        rng = random.Random(f"{base_seed}|{difficulty}|{N}x{M}")
+        pool = db.list_puzzle_seeds(N, M, difficulty)
+        k = min(len(pool), attempts - 1)
+        picks = rng.sample(pool, k) if k else []
+        taken = set(pool)
+        gen_nums = []
+        for _ in range(attempts - k):
+            while True:  # skip stored seeds: the new puzzle must grow the pool
+                n = rng.getrandbits(32)
+                if zebra.seed_code(N, M, difficulty, n) not in taken:
+                    gen_nums.append(n)
+                    break
+        plan[(N, M)] = ([("seed", s) for s in picks]
+                        + [("gen", n) for n in gen_nums])
+    return plan
+
+
+def puzzle_from_recipe(N: int, M: int, difficulty: str, recipe) -> Dict:
+    """Materialize a plan recipe into a puzzle dict."""
+    kind, v = recipe
+    if kind == "seed":
+        p = db.get_puzzle(v)
+        if p is not None:
+            return p
+        parsed = zebra.parse_seed(v)  # row vanished (db cleared?) — rebuild
+        return zebra.build_puzzle(parsed["N"], parsed["M"], parsed["difficulty"], parsed["num"])
+    return obtain_puzzle(N, M, difficulty, v)
+
+
+def start_prefetch(difficulty: str, N: int, M: int, recipes):
+    """Build the level's not-yet-stored puzzles in a background thread.
+
+    Generation is pure CPU while attempts mostly wait on the API, so the
+    planned ("gen", …) puzzles are built on the side — that's the "meanwhile
+    start generating new" half of the pool strategy. Newest-needed first: the
+    main thread builds the earliest slot itself right away anyway.
+    """
+    class _Prefetch:
+        def __init__(self):
+            self._stop = threading.Event()
+            self._started = False
+            self._thread = threading.Thread(target=self._work, daemon=True)
+
+        def _work(self):
+            for recipe in reversed(recipes):
+                if self._stop.is_set():
+                    return
+                if recipe[0] == "gen":
+                    try:
+                        obtain_puzzle(N, M, difficulty, recipe[1])
+                    except Exception:
+                        return  # main thread rebuilds and surfaces the error
+
+        def start(self):
+            self._thread.start()
+            self._started = True
+
+        def stop(self):
+            self._stop.set()
+            if self._started:
+                self._thread.join()
+
+    pf = _Prefetch()
+    if db.is_enabled() and any(r[0] == "gen" for r in recipes):
+        pf.start()
+    return pf
+
+
+def attempt_from_recipe(args, model: str, N: int, M: int, recipe, idx: int) -> Dict:
+    """One graded attempt against the puzzle a plan recipe points to."""
+    p = puzzle_from_recipe(N, M, args.difficulty, recipe)
+    return run_attempt(args, model, p, idx)
+
+
+def run_attempt(args, model: str, p: Dict, idx: int) -> Dict:
     prompt = zebra.render_prompt(p)
-    rec = {"model": model, "level": f"{N}x{M}", "N": N, "M": M, "attempt": idx,
+    rec = {"model": model, "level": f"{p['N']}x{p['M']}", "N": p["N"], "M": p["M"], "attempt": idx,
            "seed": p["seed"], "clues": len(p["clue_texts"]),
            "question": p["question"]["text"], "expected_answer": p["question"]["answer"]}
     try:
@@ -144,25 +255,29 @@ def run_attempt(args, model: str, N: int, M: int, num: int, idx: int) -> Dict:
     return rec
 
 
-def run_model(args, model: str, out) -> Dict:
+def run_model(args, model: str, out, plan: Dict) -> Dict:
     print(f"\n=== {model} ===", flush=True)
     summary = {"model": model, "max_level": None, "levels": []}
-    # Seed from the base seed ONLY (not the model name) so every model gets the
-    # identical puzzle at each (level, attempt) — a paired comparison, as the
-    # --seed help and the UI both promise. Same seed => same puzzles for all models.
-    rng = random.Random(args.seed)
+    # The puzzle plan is computed once per run (see plan_puzzles), from the base
+    # seed ONLY (never the model name), so every model gets the identical puzzle
+    # at each (level, attempt) — a paired comparison, as the --seed help and the
+    # UI both promise.
     for (N, M) in args.levels:
-        nums = [rng.getrandbits(32) for _ in range(args.attempts)]
+        recipes = plan[(N, M)]
         results: List[Dict] = []
-        if args.parallel > 1 and not args.mock:
-            with cf.ThreadPoolExecutor(max_workers=args.parallel) as ex:
-                futs = [ex.submit(run_attempt, args, model, N, M, num, i)
-                        for i, num in enumerate(nums)]
-                results = [f.result() for f in futs]
-        else:
-            for i, num in enumerate(nums):
-                results.append(run_attempt(args, model, N, M, num, i))
-                time.sleep(args.sleep)
+        pf = start_prefetch(args.difficulty, N, M, recipes)
+        try:
+            if args.parallel > 1 and not args.mock:
+                with cf.ThreadPoolExecutor(max_workers=args.parallel) as ex:
+                    futs = [ex.submit(attempt_from_recipe, args, model, N, M, recipe, i)
+                            for i, recipe in enumerate(recipes)]
+                    results = [f.result() for f in futs]
+            else:
+                for i, recipe in enumerate(recipes):
+                    results.append(attempt_from_recipe(args, model, N, M, recipe, i))
+                    time.sleep(args.sleep)
+        finally:
+            pf.stop()
         for r in results:
             out.write(json.dumps(r) + "\n")
             db.save_result(r, run_id=getattr(args, "run_id", None))
@@ -252,9 +367,10 @@ def main() -> None:
             db.remember_models(pid, models)
 
     summaries = []
+    plan = plan_puzzles(args.levels, args.attempts, args.difficulty, args.seed)
     with open(args.out, "a", encoding="utf-8") as out:
         for model in models:
-            summaries.append(run_model(args, model, out))
+            summaries.append(run_model(args, model, out, plan))
 
     print("\n=== summary ===")
     for s in summaries:

@@ -177,6 +177,18 @@ def get_puzzle(seed: str) -> Optional[Dict]:
     return json.loads(row[0]) if row else None
 
 
+def list_puzzle_seeds(N: int, M: int, difficulty: str) -> List[str]:
+    """Stored seed codes for a level+difficulty, sorted (stable sample order)."""
+    if not is_enabled():
+        return []
+
+    def fn(con):
+        return [r[0] for r in con.execute(
+            "SELECT seed FROM puzzles WHERE N=? AND M=? AND difficulty=? ORDER BY seed",
+            (N, M, difficulty))]
+    return _run(fn, write=False)
+
+
 # --------------------------------------------------------------- runs -------
 def start_run(source: str, config: Dict) -> Optional[int]:
     """Record a benchmark invocation; returns its id for the result rows.
@@ -265,6 +277,17 @@ def manual_history(limit: int = 60) -> List[Dict]:
         out.append({k: r.get(k) for k in keys})
         out[-1]["answer_correct"] = r.get("answer_correct")
     return out
+
+
+def manual_used_seeds() -> set:
+    """Seeds already answered through manual mode, so the picker can avoid them."""
+    if not is_enabled():
+        return set()
+
+    def fn(con):
+        return {r[0] for r in con.execute(
+            "SELECT DISTINCT seed FROM results WHERE manual=1 AND seed IS NOT NULL")}
+    return _run(fn, write=False)
 
 
 def clear_results() -> None:
