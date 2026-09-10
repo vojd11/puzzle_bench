@@ -42,6 +42,14 @@ import zebra
 
 DEFAULT_LEVELS = [(3, 3), (4, 4), (5, 5), (6, 6), (7, 7)]
 
+PRINT_LOCK = threading.Lock()
+
+
+def log(msg: str) -> None:
+    """Timestamped terminal line, safe to call from worker threads."""
+    with PRINT_LOCK:
+        print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
 
 # --------------------------------------------------------------- API call --
 class ApiError(Exception):
@@ -127,6 +135,7 @@ def obtain_puzzle(N: int, M: int, difficulty: str, num: int) -> Dict:
     if p is None:
         p = zebra.build_puzzle(N, M, difficulty, num)
         db.save_puzzle(p)
+        log(f"generated puzzle {seed} — {N}x{M} {difficulty}, {len(p['clue_texts'])} clues")
     return p
 
 
@@ -222,6 +231,7 @@ def attempt_from_recipe(args, model: str, N: int, M: int, recipe, idx: int) -> D
 
 def run_attempt(args, model: str, p: Dict, idx: int) -> Dict:
     prompt = zebra.render_prompt(p)
+    log(f"sent    {model} @ {p['N']}x{p['M']} seed {p['seed']} (attempt {idx + 1})")
     rec = {"model": model, "level": f"{p['N']}x{p['M']}", "N": p["N"], "M": p["M"], "attempt": idx,
            "seed": p["seed"], "clues": len(p["clue_texts"]),
            "question": p["question"]["text"], "expected_answer": p["question"]["answer"]}
@@ -252,6 +262,15 @@ def run_attempt(args, model: str, p: Dict, idx: int) -> Dict:
         rec.update({"parsed": False, "correct": False, "cell_acc": 0.0,
                     "grid_correct": False, "answer_correct": False,
                     "code_flag": False, "error": f"{type(e).__name__}: {e}"})
+    if rec.get("error"):
+        log(f"result  {model} @ {rec['level']} seed {p['seed']}: ERROR — {rec['error']}")
+    elif rec.get("disqualified"):
+        log(f"result  {model} @ {rec['level']} seed {p['seed']}: disqualified (code in reply)")
+    else:
+        lat = rec.get("latency")
+        log(f"result  {model} @ {rec['level']} seed {p['seed']}: "
+            f"{'solved' if rec['correct'] else 'failed'} | cells {(rec.get('cell_acc') or 0):.0%}"
+            + (f" | {lat:.1f}s" if lat is not None else ""))
     return rec
 
 

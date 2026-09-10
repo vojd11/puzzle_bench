@@ -534,6 +534,11 @@ def _norm(s) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
+def _norm_words(s) -> str:
+    """Lowercase words separated by single spaces (keeps word boundaries)."""
+    return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
+
+
 def extract_json(text: str) -> Optional[Dict]:
     """Last complete top-level JSON object in the text containing a "grid" key."""
     text = re.sub(r"```(?:json)?", "", text)
@@ -556,6 +561,21 @@ def extract_json(text: str) -> Optional[Dict]:
     return None
 
 
+def answer_correct(reply_answer: str, question: Dict, solution_grid: Dict) -> bool:
+    """Lenient answer check: the expected value is named, and no rival value
+    from the same category is named alongside it ("the Dane (house 9)" counts;
+    "either the Dane or the Swede" does not)."""
+    said = f" {_norm_words(reply_answer)} "
+    expected = _norm_words(question["answer"])
+    if not expected or expected not in said:
+        return False
+    for val in solution_grid.get(question["cat"], []):
+        other = _norm_words(val)
+        if other != expected and other and other in said:
+            return False
+    return True
+
+
 def grade(p: Dict, reply: str) -> Dict:
     """Score a model reply against the puzzle's known solution."""
     reply_json = extract_json(reply)
@@ -575,7 +595,7 @@ def grade(p: Dict, reply: str) -> Dict:
             if house < len(submitted_row) and _norm(submitted_row[house]) == _norm(expected):
                 correct_cells += 1
     grid_ok = correct_cells == num_cells
-    answer_ok = _norm(reply_json.get("answer", "")) == _norm(p["question"]["answer"])
+    answer_ok = answer_correct(str(reply_json.get("answer", "")), p["question"], expected_grid)
     return {"parsed": True, "cells_correct": correct_cells, "cells_total": num_cells,
             "cell_acc": correct_cells / num_cells, "grid_correct": grid_ok,
             "answer_correct": answer_ok, "correct": grid_ok and answer_ok}

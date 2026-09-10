@@ -158,6 +158,7 @@ def manual_puzzle(cfg: dict) -> dict:
     seed = (cfg.get("seed") or "").strip()
     if seed:
         p = _cached_puzzle(seed)  # replay: DB-first via the cache, build only on a miss
+        src = "replayed"
     else:
         N, M = parse_levels(cfg.get("level") or "4x4")[0]
         difficulty = cfg.get("difficulty") or "medium"
@@ -171,9 +172,13 @@ def manual_puzzle(cfg: dict) -> dict:
                   if s not in db.manual_used_seeds()]
         if unused:
             p = _cached_puzzle(random.choice(unused))
+            src = "from pool"
         else:
             p = zebra.build_puzzle(N, M, difficulty, random.getrandbits(32))
             db.save_puzzle(p)
+            src = "newly generated"
+    bench.log(f"manual puzzle {src}: {p['seed']} ({p['N']}x{p['M']} {p['difficulty']}, "
+              f"{len(p['clue_texts'])} clues)")
     return {
         "seed": p["seed"],
         "level": f"{p['N']}x{p['M']}",
@@ -228,6 +233,11 @@ def manual_submit(cfg: dict) -> dict:
     rec["error"] = None
     if save:
         _write(rec)
+    verdict = ("disqualified" if rec.get("disqualified")
+               else "solved" if rec.get("correct") else "failed")
+    bench.log(f"manual result {model} @ {lvl} seed {p['seed']}: {verdict} | "
+              f"cells {(rec.get('cell_acc') or 0):.0%}"
+              + (" | saved" if save else " | graded only"))
     return {"record": {k: rec.get(k) for k in
                        ("model", "level", "seed", "ts", "attempt", "correct", "cell_acc",
                         "parsed", "code_flag", "disqualified", "answer_correct",
@@ -314,6 +324,11 @@ def do_run(run_id: str, cfg: dict):
         emit("start", models=models,
              levels=[f"{n}x{m}" for n, m in levels], attempts=attempts,
              pass_ratio=pass_ratio, mock=bool(args.mock))
+        bench.log(f"run {run_id}: models {', '.join(models)} | levels "
+                  f"{[f'{n}x{m}' for n, m in levels]} | {attempts} attempts/level | "
+                  f"{args.difficulty}"
+                  + (" | MOCK" if args.mock else "")
+                  + (f" | parallel {parallel}" if parallel > 1 else ""))
 
         for model in models:
             if stop.is_set():
@@ -357,6 +372,9 @@ def do_run(run_id: str, cfg: dict):
                 errs = sum(1 for r in results if r.get("error"))
                 emit("level_done", model=model, level=lvl, solved=ok,
                      attempts=len(results), pass_ratio=ratio, cell_acc=acc, errors=errs)
+                bench.log(f"level {model} @ {lvl}: {ok}/{len(results)} solved, "
+                          f"cells {acc:.0%} -> {'pass' if ratio >= pass_ratio else 'fail'}"
+                          + (f" | {errs} errors" if errs else ""))
                 if ratio >= pass_ratio:
                     max_level = lvl
                 else:
@@ -364,8 +382,11 @@ def do_run(run_id: str, cfg: dict):
                     break
             emit("model_done", model=model, max_level=max_level)
             db.finish_run(run_id, {"model": model, "max_level": max_level})
+            bench.log(f"model done: {model} — highest level passed: {max_level or 'none'}")
         emit("done", stopped=stop.is_set())
+        bench.log("run finished" + (" (stopped)" if stop.is_set() else ""))
     except Exception as e:  # surface config / network errors to the UI
+        bench.log(f"run error: {type(e).__name__}: {e}")
         emit("error", message=f"{type(e).__name__}: {e}")
         emit("done", stopped=True)
     finally:
