@@ -6,3 +6,7 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+
+# Benchmark output is generated locally.
+results.jsonl
+charts/
